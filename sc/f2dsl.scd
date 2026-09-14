@@ -1,0 +1,4125 @@
+{ |rootPath|
+	var globalEnv = currentEnvironment;
+
+	Spec.add(\srcX, [0, 1]);
+	Spec.add(\srcY, [0, 1]);
+	Spec.add(\mic1X, [0, 1]);
+	Spec.add(\mic1Y, [0, 1]);
+	Spec.add(\mic2X, [0, 1]);
+	Spec.add(\mic2Y, [0, 1]);
+
+	// Physics
+	Spec.add(\decayScale, [0.1, 10.0, \exp]);
+	Spec.add(\roomSize, [0.01, 10, \exp]);
+	Spec.add(\clickVol, \amp);
+	Spec.add(\damp, [0, 1]);
+	Spec.add(\gridRes, [2, 32, \lin, 1]);
+
+	// Texture
+	Spec.add(\roughness, [0.0, 1.0]);
+	Spec.add(\rub, [0.0, 1.0]);
+	Spec.add(\dryMix, [0.0, 1.0]);
+	Spec.add(\crinkle, [0.0, 1.0]);
+
+	// Synth type IDs for visualizer (used in SendReply)
+	// 0 = modalS (legacy default), 1 = foldS, 2 = pluckS
+	Spec.add(\synthType, [0, 10, \lin, 1]);
+
+	// Standard Envelope
+	Spec.add(\atk, [0.001, 2.0, \exp]);
+	Spec.add(\dec, [0.01, 2.0, \exp]);
+	Spec.add(\sus, [0.0, 1.0]);
+	Spec.add(\rel, [0.01, 5.0, \exp]);
+	Spec.add(\curve, [-8, 8]);
+
+	// Standard FX
+	Spec.add(\gate, [0, 1, \lin, 1]);
+	Spec.add(\mix, [0, 1]);
+	Spec.add(\wet, [0, 1]);
+	Spec.add(\feedback, [0, 1]);
+	Spec.add(\drive, [1, 100, \exp]);
+	Spec.add(\width, [0, 1]);
+	Spec.add(\colorID, [0, 10, \lin, 1]);
+
+	Spec.add(\hardness, [0, 1]);
+	Spec.add(\bendAmount, [-2, 2]);
+	Spec.add(\feedback, [0, 0.99]);
+	Spec.add(\crossCouple, [0, 1.0]);
+	Spec.add(\scrupAmp, [0, 4.0]);
+	Spec.add(\damp, [0, 1]);
+
+	// ═══════════════════════════════════════════════════════════
+	// A. SYNTAX INJECTORS
+	// ═══════════════════════════════════════════════════════════
+
+	// --- Structure ---
+	~q = Object.new;
+	~q.addUniqueMethod(\at, { |self ... args| (dsl_type: \seq, list: args) });
+	~c = Object.new;
+	~c.addUniqueMethod(\at, { |self ... args| (dsl_type: \par, list: args) });
+	~m = Object.new;
+	~m.addUniqueMethod(\at, { |self ... args| (dsl_type: \bind, head: args[0], args: args[1..]) });
+
+	// --- Structure Extensions ---
+	~w = Object.new;
+	~w.addUniqueMethod(\at, { |self ... args| (dsl_type: \wseq, pairs: args.clump(2)) });
+	~r = Object.new;
+	~r.addUniqueMethod(\at, { |self ... args| (dsl_type: \rand, list: args) });
+	~rw = Object.new;
+	~rw.addUniqueMethod(\at, { |self ... args| (dsl_type: \wrand, pairs: args.clump(2)) });
+	~n = Object.new;
+	~n.addUniqueMethod(\at, { |self ... args| (dsl_type: \rep, item: args[0], times: args[1] ?? 2) });
+
+	// --- Modulation ---
+	~pick = Object.new;
+	~pick.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \pick, param: args[0], values: args[1], scope: args[2] ?? \event)
+	});
+	~ramp = Object.new;
+	~ramp.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \ramp, param: args[0], from: args[1], to: args[2], curve: args[3] ?? \lin)
+	});
+	~osc = Object.new;
+	~osc.addUniqueMethod(\at, { |self ... args|
+		var param = args[0];
+		var vals = if (args[1].isKindOf(Array)) { args[1] } { args[1..] };
+		(dsl_type: \osc, param: param, values: vals)
+	});
+	~drift = Object.new;
+	~drift.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \drift, param: args[0], center: args[1] ?? 0.5,
+			amount: args[2] ?? 0.05, speed: args[3] ?? 4)
+	});
+
+	// --- Extended Modulation Injectors ---
+	~slew = Object.new;
+	~slew.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \slew, param: args[0], from: args[1], to: args[2],
+			slewTime: args[3] ?? 0.1, curve: args[4] ?? \lin)
+	});
+	~stepR = Object.new;
+	~stepR.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \stepR, param: args[0], values: args[1], holdBeats: args[2] ?? 1)
+	});
+	~lfoR = Object.new;
+	~lfoR.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \lfoR, param: args[0], center: args[1] ?? 0.5,
+			depth: args[2] ?? 0.3, rate: args[3] ?? 1, wave: args[4] ?? \sin)
+	});
+	~envR = Object.new;
+	~envR.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \envR, param: args[0],
+			levels: args[1] ?? [0, 1, 0.6, 0],
+			times: args[2] ?? [1, 1, 2],
+			curves: args[3] ?? [\lin, \lin, \lin])
+	});
+
+
+	// ═══════════════════════════════════════════════════════════
+	// --- FX Ramp Injector (scope-aware) ---
+	~fxRamp = Object.new;
+	~fxRamp.addUniqueMethod(\at, { |self ... args|
+		(dsl_type: \fxRamp, target: args[0], param: args[1],
+			from: args[2] ?? 0, to: args[3] ?? 1, curve: args[4] ?? \lin, rate: args[5] ?? 1)
+	});
+
+	// B. DATA STORAGE
+	// ═══════════════════════════════════════════════════════════
+
+	~defs = ~defs ?? { Dictionary.new };
+	~samples = ~samples ?? { Dictionary.new };
+	~modalBuffers = ~modalBuffers ?? { Dictionary.new };
+	~rack = ();
+	~dsl = ();
+	~rack.repo = Dictionary.new;
+	~dsl.fxTargets = Dictionary.new;
+	~dsl.fxAliasMap = Dictionary.new;
+	~rack.bus = ( main: Bus.audio(s, 2), tel:  Bus.control(s, 4) );
+
+	// SynthType registry: visualizer reads this to interpret telemetry slots
+	~synthTypes = Dictionary.new;
+	~synthTypes[0] = (name: \modalS,  class: \positioned, params: #[micSpread, roughness, roomSize, modDepth]);
+	~synthTypes[1] = (name: \foldS,   class: \positioned, params: #[micSpread, crinkle, roomSize, modDepth]);
+	~synthTypes[2] = (name: \pluckS,  class: \positioned, params: #[micSpread, crinkle, roomSize, modDepth]);
+	~synthTypes[3] = (name: \kickS,   class: \simple,     params: #[tension, click, 0, 0]);
+	~synthTypes[4] = (name: \s1S,     class: \simple,     params: #[snap, timb, 0, 0]);
+	~synthTypes[5] = (name: \h1S,     class: \simple,     params: #[sharp, 0, 0, 0]);
+	~synthTypes[6] = (name: \amS,     class: \tonal,      params: #[modIndex, feedback, 0, 0]);
+	~synthTypes[7] = (name: \clayPS,  class: \tonal,      params: #[brightness, texture, drive, hardness]);
+	~synthTypes[8] = (name: \hatS,    class: \simple,     params: #[sharp, 0, 0, 0]);
+	~synthTypes[9] = (name: \kickS,   class: \simple,     params: #[tension, 0, 0, 0]);
+
+	// ═══════════════════════════════════════════════════════════
+	// C. PARSER
+	// ═══════════════════════════════════════════════════════════
+
+	~toPat = { |obj, dur|
+		// NIL GUARD: nil input → rest
+		if (obj.isNil) { Pseq([(type: \rest, dur: dur ? 1)], 1) }
+		{
+		if (obj.isKindOf(Function)) {
+			Plazy({ ~toPat.value(obj.value, dur) });
+		}
+		{
+			if (obj.isKindOf(Event) and: { obj[\dsl_type].notNil }) {
+				var type = obj[\dsl_type];
+
+				case
+
+				// ─── STRUCTURE ───
+
+				{ type == \seq } {
+					var list = obj[\list];
+					if (list.isNil or: { list.size == 0 }) {
+						Pseq([(type: \rest, dur: dur)], 1)
+					} {
+						var subDur = dur / list.size;
+						Pseq(list.collect { |item| ~toPat.value(item, subDur) }, 1);
+					}
+				}
+				{ type == \par } {
+					var list = obj[\list];
+					if (list.isNil or: { list.size == 0 }) {
+						Pseq([(type: \rest, dur: dur)], 1)
+					} {
+						Ppar(list.collect { |item| ~toPat.value(item, dur) }, 1);
+					}
+				}
+				{ type == \bind } {
+					Plazy({
+						var head = obj[\head];
+						var params = obj[\args];
+						var maxSeqLen = 1;
+
+						// Remaining non-Function modifiers become Pchain layers
+						var allPure = params.reject(_.isKindOf(Function));
+						var fxRampObjs = allPure.select { |p| p.isKindOf(Event) and: { p[\dsl_type] == \fxRamp } };
+						var pureParams = allPure.reject { |p| p.isKindOf(Event) and: { p[\dsl_type] == \fxRamp } };
+						var modifiers = pureParams.collect { |p|
+							if (p.isNil) { Pbind() }  // skip nil modifiers
+							{
+							if (p.isKindOf(Event) and: { p[\dsl_type] == \seq }) {
+								var list = p[\list];
+								var parsedList = list.collect { |item|
+									if (item.isNumber or: { item.isKindOf(Event) }) { item }
+									{ ~toPat.value(item, dur) }
+								};
+								if (list.size > maxSeqLen) { maxSeqLen = list.size };
+								if (parsedList.every(_.isNumber)) {
+									Pbind(\degree, Pseq(parsedList, inf), \dur, Pfin(maxSeqLen))
+								} {
+									Pfin(maxSeqLen, Pseq(parsedList, inf))
+								}
+							} {
+								if (p.isKindOf(Event) and: { p[\dsl_type].notNil }) {
+									~toPat.value(p, dur)
+								} {
+									if (p.isKindOf(Pattern)) { p }
+									{
+										if (p.isKindOf(Event)) { Pbind(*p.asPairs) }
+										{ if (p.isNumber) { Pbind(\degree, p) } { Pbind() } }
+									}
+								}
+							}
+							}
+						};
+
+						var headPat;
+						var isDSL = head.isKindOf(Event) and: { head[\dsl_type].notNil };
+						var isAtom = (head.isKindOf(Symbol) or: { head.isNumber } or: { head.isKindOf(Event) and: { isDSL.not } });
+
+						// Pre-process: Function modifiers (mod library) wrap the head
+						// They return DSL nodes like ~m[head, drifts...], so apply them first
+						params.do { |p|
+							if (p.isKindOf(Function)) {
+								head = try { p.(head) } { |err|
+									"[f2 warn] bind mod fn: %".format(err.errorString).postln;
+									head
+								};
+							};
+						};
+
+						if (isAtom and: { maxSeqLen > 1 }) {
+							headPat = Pn(~toPat.value(head, dur / maxSeqLen), inf);
+						} {
+							headPat = ~toPat.value(head, dur);
+						};
+
+						if (modifiers.size > 0) {
+							var mp = Pchain(headPat, *modifiers);
+							if (fxRampObjs.size > 0) {
+								var fp = fxRampObjs.collect { |obj| ~toPat.value(obj, dur) };
+								Ppar([mp] ++ fp);
+							} { mp };
+						} {
+							if (fxRampObjs.size > 0) {
+								var fp = fxRampObjs.collect { |obj| ~toPat.value(obj, dur) };
+								Ppar([headPat] ++ fp);
+							} { headPat };
+						};
+					});
+				}
+				{ type == \wseq } {
+					var pairs = obj[\pairs];
+					var totalWeight = pairs.collect { |p| p[1] }.sum;
+					Pseq(pairs.collect { |pair|
+						~toPat.value(pair[0], dur * pair[1] / totalWeight);
+					}, 1);
+				}
+				{ type == \rand } {
+					// §16-B: выбор ветки rand делается в demand-time (за s.latency до звука) → шлём /f2_branch
+					// бэкенду. nodeId/sceneId компилятор кладёт на Event: nodeId = id контейнера дерева
+					// (= randId в SessionModel бэкенда), sceneId = id строки. Нет nodeId (ручной DSL) → как
+					// раньше, без эмиссии (бэкенд тогда over-gate'ит rand — звук-безопасно).
+					// Распределение идентично прежнему (list.size.rand == .choose), просто ловим индекс.
+					var list = obj[\list];
+					var nodeId = obj[\nodeId];
+					var idxMap = obj[\idxMap];
+					var sceneId = obj[\sceneId] ? topEnvironment[\f2Scene];
+					Plazy({
+						// §v2-sc плеер вариантов: если компилятор дал v2Id/v2Dur и движок доставил
+						// выбор этой итерации (~f2Choice по ключу "<scene>/<id>/<iter>", iter =
+						// floor(beats/durПетли) с эпсилоном от float-края границы) — играем ЕГО.
+						// Нет записи (движок не подключён / самый первый демэнд) — прежний бросок.
+						var v2got, idx, outIdx, v2key;
+						if (obj[\v2Id].notNil and: { obj[\v2Dur].notNil } and: { ~f2Choice.notNil }) {
+							v2key = ((sceneId ? \default).asString ++ "/" ++ obj[\v2Id].asString
+								++ "/" ++ ((thisThread.beats / obj[\v2Dur]) + 1e-4).floor.asInteger).asSymbol;
+							v2got = ~f2Choice[v2key];
+							// §diag первые демэнд-чтения: hit (индекс движка) или nil → случайный бросок
+							if ((topEnvironment[\f2RandLog] ? 8) > 0) {
+								topEnvironment[\f2RandLog] = (topEnvironment[\f2RandLog] ? 8) - 1;
+								("[f2] rand? " ++ v2key ++ " → " ++ (v2got ? "nil(roll)")).postln;
+							};
+						};
+						idx = if (v2got.notNil and: { list.size > 0 }) { v2got.clip(0, list.size - 1) }
+							{ if (list.size > 0) { list.size.rand } { 0 } };
+						outIdx = if (idxMap.notNil) { idxMap[idx] ? idx } { idx };
+						if (nodeId.notNil and: { ~f2BackendAddr.notNil } and: { list.size > 0 }) {
+							~f2BackendAddr.sendMsg('/f2_branch',
+								(sceneId ? \default).asString, nodeId.asString, outIdx, thisThread.beats.asFloat);
+						};
+						~toPat.value(list[idx], dur);
+					});
+				}
+				{ type == \wrand } {
+					// §16-B: то же для wrand. windex(weights) даёт ВЗВЕШЕННЫЙ индекс с тем же распределением,
+					// что прежний items.wchoose(weights) — просто теперь у нас есть индекс для /f2_branch.
+					var pairs = obj[\pairs];
+					var items = pairs.collect(_[0]);
+					var weights = pairs.collect(_[1]).normalizeSum;
+					var nodeId = obj[\nodeId];
+					var idxMap = obj[\idxMap];
+					var sceneId = obj[\sceneId] ? topEnvironment[\f2Scene];
+					Plazy({
+						// §v2-sc как в \rand: выбор движка из ~f2Choice приоритетен, бросок — фоллбэк
+						var v2got, idx, outIdx, v2key;
+						if (obj[\v2Id].notNil and: { obj[\v2Dur].notNil } and: { ~f2Choice.notNil }) {
+							v2key = ((sceneId ? \default).asString ++ "/" ++ obj[\v2Id].asString
+								++ "/" ++ ((thisThread.beats / obj[\v2Dur]) + 1e-4).floor.asInteger).asSymbol;
+							v2got = ~f2Choice[v2key];
+							if ((topEnvironment[\f2RandLog] ? 8) > 0) {
+								topEnvironment[\f2RandLog] = (topEnvironment[\f2RandLog] ? 8) - 1;
+								("[f2] wrand? " ++ v2key ++ " → " ++ (v2got ? "nil(roll)")).postln;
+							};
+						};
+						idx = if (v2got.notNil and: { items.size > 0 }) { v2got.clip(0, items.size - 1) }
+							{ if (items.size > 0) { weights.windex ? 0 } { 0 } };
+						outIdx = if (idxMap.notNil) { idxMap[idx] ? idx } { idx };
+						if (nodeId.notNil and: { ~f2BackendAddr.notNil } and: { items.size > 0 }) {
+							~f2BackendAddr.sendMsg('/f2_branch',
+								(sceneId ? \default).asString, nodeId.asString, outIdx, thisThread.beats.asFloat);
+						};
+						~toPat.value(items[idx], dur);
+					});
+				}
+				{ type == \rep } {
+					var times = obj[\times] ? 2;
+					var subDur = dur / times;
+					Pseq(times.collect { ~toPat.value(obj[\item], subDur) }, 1);
+				}
+
+				// ─── MODULATION (nil-safe) ───
+
+				{ type == \pick } {
+					var param = obj[\param];
+					var values = obj[\values];
+					var scope = obj[\scope];
+					if (param.isNil or: { values.isNil } or: { values.isKindOf(Array) and: { values.isEmpty } }) { Pbind() } {
+						var basePat = Prand(values, inf);
+						var scopedPat = case
+						{ scope == \event } { basePat }
+						{ scope == \once } { Plazy({ var v = values.choose; Pn(v, inf) }) }
+						{ scope == \seq } { Pseq(values, inf) }
+						{ scope.isNumber } { Pstutter(scope.max(1), basePat) }
+						{ basePat };
+
+						if (param.isKindOf(Array)) {
+							Pbind(*param.collect { |key, i|
+								[key, Pcollect({ |arr| arr[i] }, scopedPat)]
+							}.flatten)
+						} {
+							Pbind(param, scopedPat)
+						}
+					}
+				}
+				{ type == \ramp } {
+					var param = obj[\param], from = obj[\from], to = obj[\to];
+					var curve = obj[\curve];
+					if (param.isNil or: { from.isNil } or: { to.isNil }) { Pbind() } {
+						// from/to may be Pdefn (Patterns) in live mode — can't do
+						// numeric safety checks on Patterns, so skip exp guard.
+						var fromIsNum = from.isNumber;
+						var toIsNum = to.isNumber;
+							var pat = case
+						{ curve == \rand } {
+							if (fromIsNum and: { toIsNum }) {
+								Pwhite(from.min(to), from.max(to), inf)
+							} {
+								Pwhite(from, to, inf)
+							}
+						}
+						{ // lin, exp, default: pre-computed Pseq
+							Pseq(~rampVals.(from, to, dur, curve), inf)
+						};
+						Pbind(param, pat)
+					}
+				}
+				{ type == \fxRamp } {
+					var target = obj[\target], fxParam = obj[\param];
+					var from = obj[\from], to = obj[\to], curve = obj[\curve];
+					if (target.isNil or: { fxParam.isNil } or: { from.isNil } or: { to.isNil }) { Pbind() } {
+						var steps = (dur * 10).max(4).asInteger;
+						var updateDur = dur / steps;
+						var fxRate = obj[\rate] ?? 1;
+						var vals = ~rampValsEx.(from, to, steps, curve, fxRate);
+						// Standalone Pbind: fires \fxSet events at 10x/beat
+						// Wrapped in Ppar by ~m handler → scope-aware
+						Pfin(steps, Pbind(\type, \fxSet,
+							\fxTarget, target, \fxParam, fxParam,
+							\fxVal, Pseq(vals, 1), \dur, updateDur))
+					}
+				}
+				{ type == \osc } {
+					var vals = obj[\values];
+					if (obj[\param].isNil or: { vals.isNil } or: { vals.size == 0 }) { Pbind() } {
+						Pbind(obj[\param], Pseq(vals, inf))
+					}
+				}
+				{ type == \drift } {
+					var center = obj[\center] ? 0.5, amt = obj[\amount] ? 0.05, speed = obj[\speed] ? 4;
+					if (obj[\param].isNil) { Pbind() } {
+						Pbind(obj[\param],
+							Pstutter(speed.max(1), Pwhite(center - amt, center + amt).clip(0.0, 1.0)))
+					}
+				}
+
+				// ─── EXTENDED MODULATION ───
+
+				{ type == \slew } {
+					var param = obj[\param], from = obj[\from], to = obj[\to];
+					var slewTime = obj[\slewTime] ?? 0.1;
+					if (param.isNil or: { from.isNil } or: { to.isNil }) { Pbind() } {
+						var nSteps = (dur / slewTime.max(0.01)).ceil.max(2).asInteger;
+						var stepDur = dur / nSteps;
+						var vals = Array.fill(nSteps, { |i|
+							from + ((to - from) * (i / (nSteps - 1)))
+						});
+						Pbind(param, Pseq(~envVals.(vals, Array.fill(nSteps - 1, slewTime.max(0.01)), \lin, dur), inf))
+					}
+				}
+
+				{ type == \stepR } {
+					var param = obj[\param], values = obj[\values];
+					var holdBeats = obj[\holdBeats] ?? 1;
+					if (param.isNil or: { values.isNil } or: { values.isEmpty }) { Pbind() } {
+						Pbind(param, Pstutter(holdBeats.max(1), Pseq(values, inf)))
+					}
+				}
+
+				{ type == \lfoR } {
+					var param = obj[\param];
+					var center = obj[\center] ?? 0.5, depth = obj[\depth] ?? 0.3;
+					var rate = obj[\rate] ?? 1, wave = obj[\wave] ?? \sin;
+					if (param.isNil) { Pbind() } {
+						var stepsPerCycle = (dur * rate).max(4).asInteger;
+						var lfoVals = Array.fill(stepsPerCycle, { |i|
+							var phase = i / stepsPerCycle * 2pi;
+							var v = case
+								{ wave == \sin } { sin(phase) }
+								{ wave == \tri } { 1 - (2 * ((phase / pi) % 2 - 1).abs) }
+								{ wave == \saw } { (phase / 2pi * 2) - 1 }
+								{ wave == \pulse } { if ((phase / 2pi) < 0.5) { 1 } { -1 } }
+								{ sin(phase) };
+							center + (v * depth)
+						});
+						Pbind(param, Pseq(lfoVals, inf))
+					}
+				}
+
+				{ type == \envR } {
+					var param = obj[\param];
+					var levels = obj[\levels] ?? [0, 1, 0.6, 0];
+					var times = obj[\times] ?? [1, 1, 2];
+					var curves = obj[\curves] ?? [\lin, \lin, \lin];
+					if (param.isNil) { Pbind() } {
+						Pbind(param, Pseq(~envVals.(levels, times, curves, dur), inf))
+					}
+				}
+
+				// ─── FALLBACK ───
+				{ true } { Pseq([Rest(dur)], 1) };
+			}
+
+			// ─── NON-DSL OBJECTS ───
+			{
+				// Pattern pass-through: Pbind, Pbindf, Pchain etc.
+				if (obj.isKindOf(Pattern)) { obj }
+				{
+				if (obj.isKindOf(Array)) {
+					var subDur = dur / obj.size;
+					Pseq(obj.collect { |item| ~toPat.value(item, subDur) }, 1);
+				}
+				{
+					if (obj.isKindOf(Event)) { Pseq([obj.copy.put(\dur, dur)], 1) }
+					{
+						if (obj.isKindOf(Symbol)) {
+							if (obj == \x) { Pseq([(type: \rest, dur: dur)], 1) }
+							{ Pseq([(instrument: obj, dur: dur)], 1) };
+						}
+						{
+							if (obj.isNumber) { Pseq([(degree: obj, dur: dur)], 1) }
+							{ Pseq([(type: \rest, dur: dur)], 1) }
+						}
+					}
+				}
+				}
+			}
+		}
+		}
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// D. PLAY & ENRICH
+	// ═══════════════════════════════════════════════════════════
+
+	// Pre-compute ramp values (Pseg doesn't work in Pchain context)
+	~rampVals = { |from, to, steps, curve|
+		var n = steps.max(1).asInteger;
+		if (from.isNumber and: { to.isNumber }) {
+			Array.fill(n, { |i|
+				var t = if (n > 1) { i / (n - 1) } { 1 };
+				case
+				{ curve == \exp and: { from.abs > 0.0001 and: { to.abs > 0.0001 and: { from.sign == to.sign }}}} {
+					from * (to / from).pow(t)
+				}
+				{ from + ((to - from) * t) }
+			})
+		} {
+			Array.fill(n, { |i| from + ((to - from) * (i / (n - 1).max(1))) })
+		}
+	};
+		// Full ramp value generator: handles all curve types for fxRamp
+	~rampValsEx = { |from, to, steps, curve, rate=1|
+		var n = steps.max(1).asInteger;
+		case
+		{ curve == \rand } { Array.fill(n, { from.rrand(to) }) }
+		{ curve == \lfo or: { curve == \sin } } {
+			var center = (from + to) / 2, depth = (to - from).abs / 2;
+			Array.fill(n, { |i|
+				var phase = i / n * 2pi * rate;
+				center + (sin(phase) * depth)
+			})
+		}
+		{ curve == \step } {
+			var nSteps = rate.max(1).asInteger;
+			Array.fill(n, { |i|
+				var idx = (i / (n / nSteps).max(1)).floor.asInteger.min(nSteps - 1);
+				var vals = Array.interpolation(nSteps, from, to);
+				vals[idx]
+			})
+		}
+		{ curve == \drift } {
+			var center = (from + to) / 2, amt = (to - from).abs / 2;
+			var val = center;
+			Array.fill(n, {
+				val = (val + (amt * 0.3).rand2).clip(center - amt, center + amt);
+				val
+			})
+		}
+		{ curve == \env } {
+			var env = Env([from, to, (from + to) / 2, from],
+				[steps * 0.3, steps * 0.3, steps * 0.4].max(0.01), \lin);
+			var totalDur = env.times.sum;
+			Array.fill(n, { |i| env.at(i / n * totalDur) })
+		}
+		{ ~rampVals.(from, to, n, curve) }
+	};
+~envVals = { |levels, times, curves, steps|
+		var n = steps.max(1).asInteger;
+		var env = Env(levels, times, curves);
+		var totalDur = times.sum;
+		Array.fill(n, { |i|
+			var t = if (n > 1) { i / (n - 1) * totalDur } { 0 };
+			env.at(t)
+		})
+	};
+
+	// High-resolution FX ramp event type
+	Event.addEventType(\fxSet, {
+		// §fx-chan имя → НАСТОЯЩИЙ Ndef через алиасы рэка: голое имя могло создать
+		// ПУСТОЙ Ndef («эффект убит»), а модуляция уходила в никуда (bake-путь)
+		var d = topEnvironment[\dsl], nd = ~fxTarget;
+		if (d.notNil and: { d[\fxTargets].notNil }) { nd = d[\fxTargets].at(~fxTarget) ? ~fxTarget };
+		Ndef(nd).set(~fxParam, ~fxVal);
+	});
+
+	// §fx-chan live FX path: an Ndef param is mapped onto an mb bus ONCE per deploy —
+	// the core engine writes /f2_setb (fx locks = live base, fx ramps = ranked
+	// layers, scope windows gate them), the Ndef reads the bus continuously. No
+	// per-event .set and no \fxSet storms. Reserved proxy params are never mapped
+	// (they would break routing/volume).
+	// §fx-latch semantics: the bus KEEPS the last value the engine delivered —
+	// a lock's value, once its window played, stays on the effect until the next
+	// writer plays a different one. Nothing snaps back to a base between windows,
+	// and the latch survives rack rebuilds (the bus outlives Ndef.clear and the
+	// re-applied mapping picks it right back up).
+	// Registries:
+	//   ~f2FxBase[busKey] — the param's own pre-engine value (explicit .set or the
+	//     source function's arg default), captured for seeding a FRESH bus and for
+	//     manual resets: ~f2FxBase.keysValuesDo { |k, v| ~mbAt.(k).set(v) }.
+	//   ~f2FxMaps[busKey] = [fxName, param] — every engine mapping ever requested,
+	//     so ~f2FxReapply can re-map after ~makeRack rebuilds the rack (Ndef.clear
+	//     wipes ALL mappings; before this, engine-driven fx went dead until the
+	//     next structural redeploy — the "works after the fifth restart" bug).
+	~f2FxBase = ~f2FxBase ? IdentityDictionary.new;
+	~f2FxMaps = ~f2FxMaps ? IdentityDictionary.new;
+	~f2FxMapReserved = Set[\amp, \out, \i_out, \gate, \fadeTime, \in, \tel_bus, \bus,
+		\group, \addAction, \server, \instrument, \type, \dur, \sustain, \sendGate,
+		\callback, \finish, \selfFree, \id, \freq, \midinote, \note, \degree];
+	~f2FxMap = { |fxName, param, busKey|
+		var p = param.asSymbol, k = busKey.asSymbol;
+		var nd = fxName.asSymbol;
+		if (~dsl.notNil and: { ~dsl[\fxTargets].notNil }) { nd = ~dsl[\fxTargets].at(nd) ? nd };
+		if (~f2FxMapReserved.includes(p).not and: { ~mbAt.notNil }) {
+			var existed = ((~mb.notNil) and: { ~mb[k].notNil }) or: { (~mbRaw.notNil) and: { ~mbRaw[k].notNil } };
+			var b = ~mbAt.(k);
+			// cur: a number → the param's own set value; nil → never set, take the
+			// source function's arg default; the \cN map symbol → already mapped.
+			var cur = try { Ndef(nd).nodeMap.at(p) } { nil };
+			if (cur.isNil) {
+				cur = try {
+					var cn = Ndef(nd).controlNames.detect { |c| c.name == p };
+					cn !? { cn.defaultValue };
+				} { nil };
+			};
+			if (cur.isNumber) {
+				~f2FxBase[k] = cur; // bookkeeping for manual resets
+				// §fx-latch: seed ONLY a fresh bus (else mapping would snap the
+				// param to 0 until the first delivery). An existing bus holds the
+				// latched value — never overwrite it here.
+				if (existed.not) { b.set(cur) };
+			};
+			~f2FxMaps[k] = [fxName.asSymbol, p];
+			// TRAP: NodeProxy.map is an alias of .set, and a raw Bus converts to
+			// its INDEX as a control input — `Ndef(nd).map(p, b)` was literally
+			// setting the param to the bus number (mix := 214), never mapping it,
+			// so fx locks/ramps did not move the effect at all. bus.asMap (\cN)
+			// is what the server understands as "map this control to bus N", and
+			// the proxy re-sends it from its nodeMap on every source rebuild.
+			try { Ndef(nd).set(p, b.asMap) } { |err|
+				("⚠ [f2FxMap] " ++ fxName ++ "." ++ param ++ ": " ++ err.errorString).postln };
+		};
+	};
+	// Re-map every registered engine fx param — called by ~makeRack / the front
+	// rack deploy after a rack rebuild (their Ndef clear dropped all mappings).
+	// The latched bus values survive the rebuild and the mapping picks them back
+	// up. /f2_fxsync then tells the core to forget its fx diffs and re-send all
+	// live values — guards active writers against fresh-bus seeding.
+	~f2FxReapply = {
+		if (~f2FxMaps.size > 0) {
+			("[f2] fx remap after rack rebuild: " ++ ~f2FxMaps.size ++ " param(s)").postln;
+			~f2FxMaps.keysValuesDo { |k, np| ~f2FxMap.(np[0], np[1], k) };
+			(~f2CoreAddr ? ~f2BackendAddr ? NetAddr("127.0.0.1", 57121)).sendMsg('/f2_fxsync');
+		};
+	};
+	// /f2_fxrest <scKey…> — MANUAL reset tool (the core does not send it under
+	// §fx-latch): snap the named sinks back to their captured pre-engine values.
+	// No args = reset every captured sink. Console: ~f2FxHome.value.
+	OSCdef(\f2_fxrest, { |msg|
+		topEnvironment.use {
+			var i = 1;
+			while { i < msg.size } {
+				var k = msg[i].asSymbol, base = ~f2FxBase[k];
+				if (base.isNumber and: { ~mbAt.notNil }) { ~mbAt.(k).set(base) };
+				i = i + 1;
+			};
+			if (msg.size <= 1) { ~f2FxHome.value };
+		};
+	}, '/f2_fxrest').permanent_(true);
+	// ~f2FxHome — return every engine-driven fx param to its own base value.
+	~f2FxHome = {
+		if (~mbAt.notNil) {
+			~f2FxBase.keysValuesDo { |k, v| if (v.isNumber) { ~mbAt.(k).set(v) } };
+			("[f2] fx home: " ++ ~f2FxBase.size ++ " param(s) reset").postln;
+		};
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// §reuse — ПЕРЕИСПОЛЬЗОВАНИЕ СИНТА (постоянные голоса вместо спавна-на-ноту)
+	// ───────────────────────────────────────────────────────────
+	// Пул постоянных синтов НА ПРЕСЕТ (voices 1..5). Событие ячейки НЕ спавнит новый синт —
+	// берёт голос из пула, МАППИТ его модулируемые арги на per-cell шины (~mbAt) и гейтит.
+	// Голос жив всегда (i_free=0) → grPos читает уже наполненную базой шину БЕЗ гонки рождения
+	// (щелчок онсета уходит), число нод ограничено (≤ voices·пресетов). Тумблер ~f2Reuse=false
+	// + пере-деплой → ТОЧНОЕ прежнее поведение (спавн). reattack: gate-off через sustain
+	// (0→1 на след. ноте = ре-атака); legato: gate держится 1 (глайд). Перекрытие в пуле:
+	// поколение голоса (gen) не даёт старому gate-off резать новую ноту того же голоса.
+	// Синты без контрола \i_free самоосвобождаются на релизе → голос пересоздаётся (деградация
+	// до спавна), собственные синты F2 (sliceS/edge/matter) держат \i_free=0 → полный reuse.
+	// ═══════════════════════════════════════════════════════════
+	~f2Reuse = ~f2Reuse ? true;
+	~f2Voices = ~f2Voices ? IdentityDictionary.new;
+	~f2VGroups = nil;   // §loop-order v2 миграция: прежний словарь с ядовитым parent-ивaром — в мусор
+	// §reuse освобождение голосов СТРОКИ (стоп/выключение строки И начало каждого деплоя — см.
+	//   компилятор). Иначе постоянные голоса i_free=0 висят: legato/hold держат gate → звук не
+	//   глохнет; а после /f2/hush ~f2PatGroup.freeAll убивает голоса МОЛЧА (/g_freeAll не шлёт
+	//   /n_end) — isPlaying остаётся true, и следующий деплой маппит МЁРТВЫЕ ноды → флуд
+	//   «/n_mapn Node not found». Поэтому из словаря убираем сразу, а set/free шлём с ПОДАВЛЕНИЕМ
+	//   ошибки (нода могла быть уже убита freeAll — «not found» не спамит). Гейт-офф → .free после
+	//   хвоста (мягкий релиз, если нода ещё жива).
+	// §stack voice accessors. A pooled voice is either a plain Synth or a STACK
+	// PROXY — an Event (grp: Group, nodes: id → Synth, out: output id) built by
+	// mkVoice for a composite preset. §cards strips build the same proxy plus
+	// `sink`: nodes = cards, out = the last on-card (the telId target only),
+	// sink = the \f2chainOut output node that applies the PRESET level. Every
+	// pool site goes through these accessors so both kinds behave identically:
+	// nodeID comes from the group (n_set/n_map/n_free on a group reach all its
+	// children); liveness needs the group AND every node; set/map demux
+	// prefixed args `id__param` to the owning node (an id without a node —
+	// bypassed / removed card — is dropped silently), broadcast the shared
+	// gate/t_trig/freq to the group, and route un-prefixed unit params: a
+	// stack sends them (amp, atk…) to its output node, a strip with a sink
+	// sends `amp` to the sink and drops every other plain name (each card's
+	// own params are `id__param`). Bodies avoid bare ~ (called from Event:play
+	// — see the note in f2units.scd).
+	~f2VNode = { |v| if (v.isKindOf(Event)) { v[\grp].nodeID } { v.tryPerform(\nodeID) } };
+	// §cards liveness: user SynthDefs from Synths/ use doneAction: 2 and have no
+	// i_free — as a card such a node self-frees after its first release while
+	// the voice group stays "playing"; judged by the group alone the pool never
+	// respawned the slot and it stayed silent forever. Every card node (and the
+	// sink) is registered at spawn, so a dead child marks the voice dead and
+	// the pool respawns it (freeing the group first — nothing leaks).
+	~f2VPlaying = { |v|
+		if (v.isKindOf(Event)) {
+			v[\grp].isPlaying
+				and: { v[\nodes].values.every { |n| n.isPlaying } }
+				and: { v[\sink].isNil or: { v[\sink].isPlaying } }
+		} { v.isPlaying }
+	};
+	~f2VDemux = { |v, args|   // flat [k, val …] → (shared: [...], per: id → [...], sink: [...])
+		var shared = [], per = IdentityDictionary.new, sink = [];
+		args.pairsDo { |k, val|
+			// (`arg` is a reserved word in sclang — argument names are `an`)
+			var ks = k.asString, i = ks.find("__"), id, an;
+			if (i.notNil and: { i > 0 }) {
+				id = ks.copyFromStart(i - 1).asSymbol;
+				an = ks.copyToEnd(i + 2).asSymbol;
+			};
+			if (id.notNil) {
+				// prefixed: to its node; no node (bypassed / removed card) → dropped, never per[nil]
+				if (v[\nodes][id].notNil) { per[id] = (per[id] ? []) ++ [an, val] };
+			} {
+				if (#[\gate, \t_trig, \freq].includes(k)) { shared = shared ++ [k, val] } {
+					if (v[\sink].notNil) {
+						// §cards strip: `amp` is the PRESET level (output node); any other
+						// plain name has no addressee
+						if (k == \amp) { sink = sink ++ [k, val] };
+					} {
+						// stack (or a strip without f2units' output node): plain unit
+						// params go to the output node; an empty strip has none (out =
+						// nil) and drops them (never a nil key).
+						v[\out] !? { |oid| per[oid] = (per[oid] ? []) ++ [k, val] };
+					};
+				};
+			};
+		};
+		(shared: shared, per: per, sink: sink)
+	};
+	~f2VSet = { |v, args|
+		if (v.isKindOf(Event)) {
+			var d = topEnvironment[\f2VDemux].value(v, args);
+			if (d[\shared].size > 0) { v[\grp].set(*d[\shared]) };
+			d[\per].keysValuesDo { |id, a| v[\nodes][id] !? { |n| n.set(*a) } };
+			if (d[\sink].size > 0) { v[\sink] !? { |n| n.set(*d[\sink]) } };
+		} { v.set(*args) };
+	};
+	~f2VMap = { |v, param, idx|
+		if (v.isKindOf(Event)) {
+			var d = topEnvironment[\f2VDemux].value(v, [param, idx]);
+			if (d[\shared].size > 0) { v[\grp].map(*d[\shared]) };
+			d[\per].keysValuesDo { |id, a| v[\nodes][id] !? { |n| n.map(*a) } };
+			if (d[\sink].size > 0) { v[\sink] !? { |n| n.map(*d[\sink]) } };
+		} { v.map(param, idx) };
+	};
+	// §bus-gen освобождение записи реестра stage-шин. Запись помнит АЛЛОКАТОР, у
+	// которого взяла шину: после s.newBusAllocators (ребут сервера при живом sclang)
+	// аллокатор — новый объект, а индекс из прежней жизни давно выдан кому-то ещё, и
+	// .free отдал бы ему чужой живой блок. Не совпал — просто забываем запись.
+	~f2StackBusRel = { |o|
+		if (o.notNil and: { o[\alloc] === s.audioBusAllocator }) { try { o[\bus].free } };
+	};
+	// §bus-gen хоронит ПРЕЖНИЕ ПОКОЛЕНИЯ того же пула. poolKey — «строка|пресет@nodeID
+	// группы», и nodeID меняется на каждом hush/релонче: записи старых поколений
+	// оставались в реестре навсегда вместе со своими шинами (реестр никто не обходил),
+	// так что за долгую сессию пул audio-шин сервера выедался — Bus.audio отдавал nil,
+	// а событие голоса падало на `.index` у nil. Новое поколение хоронит все прежние:
+	// их группа снята, читать эти шины некому. Освобождение отложено на 0.5 с — тем же
+	// запасом, что и мягкая отставка §cfg-sig: голоса прежнего поколения могли ещё
+	// доигрывать релиз, и шина под ними не должна уйти под другого хозяина мгновенно.
+	// §bus-park СРОК отставки. Шина обязана пережить голоса, которые с неё читали, а их
+	// освобождают на РАЗНЫХ часах: сцена — через 0.4 БИТА (TempoClock), мягкая отставка
+	// §cfg-sig — через 0.4 СЕКУНДЫ. На медленном темпе 0.4 бита это почти секунда, и
+	// фиксированные полсекунды отдали бы индекс под ещё звучащим голосом. Отсюда общий
+	// знаменатель: «после голосов, плюс десятая».
+	~f2StackBusAfterBeats = { |beats = 0.4| ((beats * TempoClock.default.beatDur).max(0.4)) + 0.1 };
+	// §bus-park отставка записи. Раньше каждое место отставки снимало запись с реестра и
+	// держало её ТОЛЬКО в замыкании отложенного вызова — а CmdPeriod чистит запланированные
+	// функции, и шина, уже снятая с учёта, но не дождавшаяся своего .free, терялась без
+	// единой ссылки: текло ровно то, что чинилось. Теперь снятая запись ждёт в списке со
+	// СВОИМ сроком, и любая следующая отставка сливает всё, что успело созреть — один
+	// потерянный вызов больше ничего не стоит. Срок — по Main.elapsedTime, как и везде в
+	// этом движке: отметку ставят из TempoClock-рутины, а сливают по SystemClock, и часы
+	// тут не должны иметь значения.
+	~f2StackBusRetire = { |e, delay = 0.5|
+		if (e.notNil) {
+			e[\due] = Main.elapsedTime + delay;
+			topEnvironment[\f2StackBusParked] = (topEnvironment[\f2StackBusParked] ? []).add(e);
+		};
+		SystemClock.sched(delay, {
+			var now = Main.elapsedTime, keep = [];
+			(topEnvironment[\f2StackBusParked] ? []).do { |o|
+				if ((o[\due] ? 0) <= now) {
+					topEnvironment[\f2StackBusRel].value(o);
+				} {
+					keep = keep.add(o);
+				};
+			};
+			topEnvironment[\f2StackBusParked] = keep;
+			nil
+		});
+	};
+	~f2StackBusGen = { |reg, poolKey|
+		var ps = poolKey.asString, at, pre;
+		ps.do { |c, i| if (c == $@) { at = i } };
+		if (at.notNil) {
+			pre = ps.copyRange(0, at);            // «строка|пресет@», граница по @
+			reg.keys.asArray.do { |k|
+				if (k != poolKey and: { k.asString.beginsWith(pre) }) {
+					topEnvironment[\f2StackBusRetire].value(reg[k],
+						topEnvironment[\f2StackBusAfterBeats].value(0.4));
+					reg.removeAt(k);
+				};
+			};
+		};
+	};
+	// §stack private route buses per pool: one stereo slot per (source unit ×
+	// voice), reused across respawns of the same pool; reallocated only when
+	// the slot count changes (graph or voices edited).
+	~f2StackBusAt = { |poolKey, pairs|
+		var reg = topEnvironment[\f2StackBus];
+		var e, n = pairs.max(1);
+		if (reg.isNil) { reg = IdentityDictionary.new; topEnvironment[\f2StackBus] = reg };
+		e = reg[poolKey];
+		if (e.isNil or: { e[\n] != n }) {
+			e !? { |o| topEnvironment[\f2StackBusRel].value(o) };
+			if (e.isNil) { topEnvironment[\f2StackBusGen].value(reg, poolKey) };
+			e = (bus: Bus.audio(s, 2 * n), n: n, alloc: s.audioBusAllocator);
+			// Пустой аллокатор возвращает nil. Раньше nil-запись ЛОЖИЛАСЬ В РЕЕСТР,
+			// и пул оставался сломанным до конца сессии даже после того, как шины
+			// освобождались: следующий вызов видел e[\n] == n и отдавал тот же nil.
+			// Не кэшируем провал — и говорим о нём вслух, иначе это просто тишина.
+			if (e[\bus].isNil) {
+				reg.removeAt(poolKey);
+				e = nil;
+				("✗ f2: не выделить stack-шину (% кан.) пулу % — пул audio-шин сервера исчерпан; поднимите s.options.numAudioBusChannels и перезагрузите сервер").format(2 * n, poolKey).postln;
+			} {
+				reg[poolKey] = e;
+			};
+		};
+		if (e.isNil) { nil } { e[\bus] }
+	};
+
+	~f2FreeSceneVoices = { |sceneKey|
+		var pre = sceneKey.asString ++ "|";
+		var sreg = topEnvironment[\f2StackBus];
+		(~f2Voices ? IdentityDictionary.new).keys.do { |k|
+			if (k.asString.beginsWith(pre)) {
+				var pool = ~f2Voices[k];
+				~f2Voices.removeAt(k);
+				if (pool.notNil) {
+					pool[\synths].do { |sy| if (sy.notNil) {
+						s.sendBundle(nil, [\error, 0], [\n_set, ~f2VNode.(sy), \gate, 0], [\error, 1]);
+					} };
+					TempoClock.default.sched(0.4, { pool[\synths].do { |sy| if (sy.notNil) {
+						s.sendBundle(nil, [\error, 0], [\n_free, ~f2VNode.(sy)], [\error, 1]);
+					} }; nil });
+				};
+			};
+		};
+		// §bus-gen стоп строки забирает и ЕЁ stage-шины. Реестр ~f2StackBus эта функция
+		// не трогала вовсе, поэтому каждая (строка × пресет), хоть раз сыгравшая за
+		// сессию, держала свою стерео-пачку до самого ребута сервера — а пул audio-шин
+		// у scsynth один на всё. Освобождаем тем же отложением 0.4 с, что и голоса:
+		// они как раз доигрывают релиз на этих шинах.
+		sreg !? { |reg|
+			reg.keys.asArray.do { |k|
+				if (k.asString.beginsWith(pre)) {
+					topEnvironment[\f2StackBusRetire].value(reg[k],
+						topEnvironment[\f2StackBusAfterBeats].value(0.4));
+					reg.removeAt(k);
+				};
+			};
+		};
+	};
+	Event.addEventType(\f2voice, { |server|
+		var ev = currentEnvironment;
+		var top = topEnvironment;
+		var def = ev[\f2def];
+		var cfg = ev[\f2cfg] ? IdentityDictionary.new;
+		var instr = ev[\instrument];
+		// §fix ev[\group] в СОБЫТИИ — ЛЕНИВАЯ функция (не Node), .nodeID на ней падал
+		//   («Message 'nodeID' not understood»). Берём РЕАЛЬНУЮ группу паттерна ~f2PatGroup:
+		//   в неё же играет Pdef и её же освобождает redeploy/hush → голоса чистятся верно.
+		var grp = top[\f2PatGroup];
+		var sd = SynthDescLib.global.at(instr);
+		var ctrl = if (sd.notNil) { sd.controlNames } { [] };
+		// §stack composite preset: cfg[\stack] = [(id, unit, ins: (arg: srcId)…)],
+		// cfg[\stackOut] = output id. The voice's control set is the union of
+		// every sub-unit's controls under `id__` prefixes plus the shared
+		// gate/t_trig/freq/out/buf and the output unit's plain names (so an
+		// un-prefixed amp/atk… addresses the output node).
+		var stk = cfg[\stack];
+		// §cards strip preset: cfg[\chain] = [(id, unit, opts?, rd, wr)…] — the ON
+		// cards in strip order, cfg[\chainN] = number of private stages. The LAST
+		// card writes the preset's out and owns the un-prefixed unit params. A
+		// card with `opts` spawns a SynthDef VARIANT (~f2UnitDef in f2units);
+		// chnDef caches id → resolved def name for this event (ctrl union,
+		// mkVoice and the pool fingerprint all read it).
+		var chn = cfg[\chain];
+		var chnDef;
+		// §cards-out the strip's output node (\f2chainOut, f2units): when its def
+		// is loaded the final stage is a private slot and the bare `amp` is the
+		// PRESET level; without it the last cards write the out directly (legacy
+		// layout — cfgSig |sink0 respawns the pool once f2units arrives).
+		var hasSink = false;
+		var nv = ((cfg[\voices] ? 1).clip(1, 5)).asInteger;
+		var artic = cfg[\artic] ? \reattack;
+		var hasFree = (ev[\f2hasFree] ? false);
+		var voices = top[\f2Voices];
+		var poolKey;
+		var reserved = Set[\gate, \out, \i_out, \tel_bus, \i_free, \instrument, \type, \group,
+			\f2def, \f2cfg, \f2map, \f2hasFree, \f2_cid, \dur, \sustain, \legato, \delta,
+			\addAction, \server, \callback, \finish, \sendGate, \selfFree, \id, \play, \parent, \buf];
+		var mkVoice, pool, voice, idx, myGen, setA, susBeats, durB, cfgSig, gateOff, vgrp;
+		var offAtA, nowT, stillOpen, holdCont, respawned;
+		// one warning per key (~f2UnitWarnOnce when f2units is loaded, else a plain post)
+		var warnOnce = { |key, msg|
+			if (top[\f2UnitWarnOnce].notNil) { top[\f2UnitWarnOnce].(key, msg) } { msg.postln };
+		};
+		// §tape units with a \tempo control follow the global tempo bus
+		// (~f2TempoBus, written at 60 Hz by f2_remote_eval): mapped right after
+		// the spawn, in every spawn path (plain synth, stack cards, strip cards).
+		var tempoMap = { |node, names|
+			if (names.includes(\tempo) and: { top[\f2TempoBus].notNil }) {
+				node.map(\tempo, top[\f2TempoBus].index);
+			};
+			node
+		};
+
+		// §cards a cfg naming BOTH stack: and chain: is malformed (the compilers
+		// never emit both): the strip wins, the stack is ignored — warned once.
+		// The stack and strip branches below are mutually exclusive either way.
+		if (stk.notNil and: { chn.notNil }) {
+			warnOnce.(("cfg_both_" ++ def.asString).asSymbol,
+				"⚠ [f2 chain] %: cfg has both stack: and chain: — the strip is used, the stack ignored".format(def));
+			stk = nil;
+		};
+		// §cards-orphan a composite preset whose cfg carries NO graph: the
+		// ~f2ReuseCfg line was written by an engine that predates §cards (the
+		// compilers always emit `chain:`, even for an empty strip), so there is
+		// nothing to spawn. An EMPTY strip is the safe reading — the preset goes
+		// silent and says so once. Falling through to the plain-synth branch
+		// would send the server /s_new with the def name "chain".
+		if (chn.isNil and: { stk.isNil } and: { #[\chain, \stack].includes(instr) }) {
+			warnOnce.(("cfg_nograph_" ++ def.asString).asSymbol,
+				"⚠ [f2 chain] %: instrument % but its ~f2ReuseCfg line carries no chain:/stack: — the preset is SILENT (the engine that compiled it predates §cards: rebuild core/f2core)".format(def, instr));
+			chn = [];
+		};
+		hasSink = chn.notNil and: { SynthDescLib.global.at(\f2chainOut).notNil };
+
+		if (stk.notNil and: { chn.isNil }) {
+			ctrl = [\gate, \t_trig, \freq, \out, \buf];
+			stk.do { |u|
+				var ud = SynthDescLib.global.at(u[\unit]);
+				if (ud.notNil) {
+					var pre = u[\id].asString ++ "__";
+					ctrl = ctrl ++ ud.controlNames.collect { |c| (pre ++ c.asString).asSymbol };
+					if (u[\id] == cfg[\stackOut]) { ctrl = ctrl ++ ud.controlNames };
+				};
+			};
+		};
+		// §cards control union of a strip, same shape as the stack one: shared
+		// names + `id__ctrl` of every card + the PRESET level `amp` (the output
+		// node's; with the legacy layout the last card's plain names instead).
+		// The variant's SynthDesc (or the base unit's — every variant declares
+		// the same control set) supplies the names; without f2units (no
+		// ~f2UnitDef) the base unit is used. An empty strip keeps the shared
+		// names (+ amp).
+		if (chn.notNil and: { stk.isNil }) {
+			var outId = if (chn.size > 0) { chn.last[\id] } { nil };
+			ctrl = [\gate, \t_trig, \freq, \out, \buf];
+			if (hasSink) { ctrl = ctrl ++ [\amp] };
+			chnDef = IdentityDictionary.new;
+			chn.do { |c|
+				// ~f2UnitDef answers the variant name only once the variant is BUILT
+				// (else the base unit — and kicks the build): the fingerprint below
+				// gains "@variant" when the def exists and the pool respawns once.
+				var udef = if (c[\opts].notNil and: { top[\f2UnitDef].notNil })
+					{ top[\f2UnitDef].(c[\unit], c[\opts]) ? c[\unit] } { c[\unit] };
+				var ud = SynthDescLib.global.at(udef) ?? { SynthDescLib.global.at(c[\unit]) };
+				chnDef[c[\id]] = udef;
+				if (ud.notNil) {
+					var pre = c[\id].asString ++ "__";
+					ctrl = ctrl ++ ud.controlNames.collect { |cn| (pre ++ cn.asString).asSymbol };
+					// legacy layout only: the last card owns the plain names
+					if (hasSink.not and: { c[\id] == outId }) { ctrl = ctrl ++ ud.controlNames };
+				};
+			};
+		};
+		if (grp.isKindOf(Node).not) { grp = s.defaultGroup };   // не Node → дефолт-группа сервера
+		// two-step (ловушка dict[k]=v возвращает приёмник); на практике словарь уже создан DSL-инитом
+		if (voices.isNil) { voices = IdentityDictionary.new; top[\f2Voices] = voices };
+		// §reuse poolKey = СТРОКА|пресет@группа: пул на (строку × пресет), чтобы стоп строки
+		//   освобождал ровно её голоса (~f2FreeSceneVoices), а не чужие.
+		poolKey = ((ev[\f2scene] ? \_).asString ++ "|" ++ def.asString ++ "@" ++ grp.nodeID.asString).asSymbol;
+
+		// §loop-order ДЕТЕРМИНИРОВАННЫЙ порядок голосов: подгруппа на (строка×пресет),
+		// вставленная по СОРТИРОВКЕ defKey среди подгрупп того же родителя. Порядок нод
+		// раньше зависел от порядка ПЕРВЫХ онсетов (addToHead при спавне) — а он гуляет
+		// (rand-ветки, redeploy). Для петель портов это фатально: InFeedback даёт 0 или
+		// 1 блок задержки на хоп В ЗАВИСИМОСТИ ОТ ПОРЯДКА НОД, т.е. одна и та же петля
+		// звучала по-разному от запуска к запуску. Сортировка по defKey делает порядок
+		// (и блочные задержки петель) воспроизводимыми всегда. Родитель — ~f2PatGroup;
+		// смена родителя (hush → новая группа) пересоздаёт подгруппу.
+		// ВАЖНО: ключ родителя в записи — \par, НЕ \parent: у Event/IdentityDictionary
+		// \parent — служебный слот цепочки прототипов (чтение уходит в parent-lookup по
+		// Group → «Message not understood», событие гибнет = съеденная нота). try —
+		// страховка: ЛЮБОЙ сбой §loop-order деградирует в спавн прямо в patGroup
+		// (прежнее поведение), но не убивает ноту.
+		vgrp = try {
+			// §loop-order v3 ЛОВУШКА dict[k]=v: присваивание возвращает СЛОВАРЬ-ПРИЁМНИК
+			// (см. канон у ~mbAt) — `top[\k] ?? { top[\k] = Dict.new }` на ПЕРВОМ спавне
+			// отдавало topEnvironment; keysValuesDo шёл по ВСЕМУ окружению и падал 'at'
+			// на первом же Group/Bus. Только явный two-step.
+			var vgs = top[\f2VGrp2];
+			var e;
+			if (vgs.isNil) { vgs = IdentityDictionary.new; top[\f2VGrp2] = vgs; top[\f2VGroups] = nil };
+			e = vgs[poolKey];
+			if (e.notNil and: { e[\par] !== grp }) { vgs.removeAt(poolKey); e = nil };
+			if (e.isNil) {
+				var myDef = def.asString, pred, succ;
+				vgs.keysValuesDo { |k, o|
+					if (o[\par] === grp) {
+						if (o[\def] < myDef) {
+							if (pred.isNil or: { o[\def] > pred[\def] }) { pred = o };
+						} {
+							if (succ.isNil or: { o[\def] < succ[\def] }) { succ = o };
+						};
+					};
+				};
+				e = (par: grp, def: myDef,
+					g: if (pred.notNil) { Group.after(pred[\g]) }
+						{ if (succ.notNil) { Group.before(succ[\g]) } { Group.head(grp) } });
+				vgs[poolKey] = e;
+			};
+			e[\g]
+		} { |err|
+			("⚠ [f2 loop-order] " ++ err.errorString ++ " — spawning in patGroup").postln;
+			grp
+		};
+
+		mkVoice = { |vi = 0|
+			var a = [\out, (ev[\out] ? 0), \tel_bus, (ev[\tel_bus] ? 0), \gate, 0];
+			var po = cfg[\portOut], pins = cfg[\portIns];
+			var sy;
+			if (hasFree) { a = a ++ [\i_free, 0] };
+			if (ev[\buf].notNil) { a = a ++ [\buf, ev[\buf]] };
+			// §synth-mod порты (f2units.scd): выход голоса vi → слот порта; порт-входы →
+			// слоты писателя (vi % wv). Слоты фиксированы на весь срок жизни голоса —
+			// ставятся при спавне; отсутствие хелперов кричит §port-guard ниже, а флаг
+			// |h в cfgSig пересоберёт пул, когда f2units догрузится.
+			if (po.notNil and: { top[\f2PortOutSlot].notNil }) {
+				a[1] = top[\f2PortOutSlot].(po, vi);
+			};
+			// §port-guard раньше отсутствие хелперов (f2units не загрузился) деградировало
+			// МОЛЧА: голос порт-писателя оставался на прямом выходе и «звучал снаружи
+			// порта» без единой строчки в консоли. Теперь кричим — причину видно сразу.
+			if ((po.notNil or: { pins.notNil }) and: { top[\f2PortOutSlot].isNil }) {
+				("⚠ [f2 ports] % requests ports (portOut/portIns) but f2units is NOT loaded — voice falls back to the direct out".format(def)).postln;
+			};
+			// §stack voice = a Group (tail of the preset subgroup) holding one Synth
+			// per sub-unit in list order (sources before processors — loops are
+			// legal, one block late through InFeedback like ports). Internal routes
+			// are private stereo slots (~f2StackBusAt: source unit × voice, fixed at
+			// spawn); the output unit writes the resolved out (a[1] = port slot or
+			// ev out), every other unit writes its own source slot. External port
+			// inputs address a sub-unit as `id__arg` in cfg[\portIns]. telId goes to
+			// the output unit (vi 0), buf to every unit that has it. The returned
+			// proxy is what the pool stores; see ~f2VSet/~f2VMap/~f2VNode.
+			if (stk.notNil and: { chn.isNil }) {
+				var vg = Group.new(vgrp, \addToTail);
+				var nodes = IdentityDictionary.new;
+				var srcIds = [], srcSlot = IdentityDictionary.new;
+				var outId = cfg[\stackOut];
+				var sb;
+				stk.do { |u| (u[\ins] ? ()).keysValuesDo { |an, src|
+					if (srcIds.includes(src).not) { srcIds = srcIds.add(src) } } };
+				sb = top[\f2StackBusAt].(poolKey, srcIds.size * nv);
+				// §bus-guard та же страховка, что в chain-ветке: пустой пул шин не должен
+				// ронять событие (ошибка в Event:play рвёт поток паттерна навсегда).
+				srcIds.do { |id, si| srcSlot[id] = if (sb.isNil) { a[1] } { sb.index + (2 * ((si * nv) + vi)) } };
+				vg.register(true);
+				stk.do { |u|
+					var ud = SynthDescLib.global.at(u[\unit]);
+					var uc = if (ud.notNil) { ud.controlNames } { [] };
+					var uout = if (u[\id] == outId) { a[1] } { srcSlot[u[\id]] ? 0 };
+					var ua = [\out, uout, \gate, 0, \tel_bus, (ev[\tel_bus] ? 0)];
+					if (u[\id] == outId and: { srcSlot[u[\id]].notNil }) {
+						("⚠ [f2 stack] %: output unit % also feeds a route — unsupported in v1 (route ignored)".format(def, u[\id])).postln;
+					};
+					if (uc.includes(\i_free)) { ua = ua ++ [\i_free, 0] };
+					if (ev[\buf].notNil and: { uc.includes(\buf) }) { ua = ua ++ [\buf, ev[\buf]] };
+					(u[\ins] ? ()).keysValuesDo { |an, src|
+						if (uc.includes(an) and: { srcSlot[src].notNil }) { ua = ua ++ [an, srcSlot[src]] };
+					};
+					if (pins.notNil and: { top[\f2PortInSlot].notNil }) {
+						var pre = u[\id].asString ++ "__";
+						pins.keysValuesDo { |k, pn|
+							var ks = k.asString;
+							if (ks.beginsWith(pre)) {
+								var an = ks.copyToEnd(pre.size).asSymbol;
+								if (uc.includes(an)) { ua = ua ++ [an, top[\f2PortInSlot].(pn, vi)] };
+							};
+						};
+					};
+					if (cfg[\telId].notNil and: { vi == 0 } and: { u[\id] == outId } and: { uc.includes(\telId) }) {
+						ua = ua ++ [\telId, cfg[\telId]];
+					};
+					if (ud.notNil) {
+						var n = Synth(u[\unit], ua, vg, \addToTail);
+						n.register(true);   // liveness (~f2VPlaying): a self-freeing sub-unit marks the voice dead
+						nodes[u[\id]] = tempoMap.(n, uc);
+					} {
+						// §cut same reason as the strip below: name the unit, the preset
+						// and the successor, once — a skipped sub-module takes everything
+						// routed through it with it.
+						if (top[\f2UnitGone].notNil) {
+							top[\f2UnitGone].(u[\unit], def, u[\id]);
+						} {
+							("⚠ [f2 stack] %: unit % has no SynthDef — sub-module skipped".format(def, u[\unit])).postln;
+						};
+					};
+				};
+				sy = (grp: vg, nodes: nodes, out: outId);
+			};
+			// §cards strip voice = a Group (tail of the preset subgroup) holding one
+			// Synth per ON card in strip order (\addToTail ⇒ execution order =
+			// strip order) and, LAST, the output node \f2chainOut. The stream lives
+			// on private stereo STAGE slots (~f2StackBusAt: stage × voice, fixed at
+			// spawn): a synth card writes stage `wr` (Out.ar sums — two synths side
+			// by side are layers), a processor reads stage `rd` through `chainIn`
+			// (In.ar: same cycle, no delay — its writers sit earlier in the group)
+			// and writes `wr`. wr = -1 is the FINAL stage — a private slot as well
+			// (slot chainN, hence (chainN + 1) × nv slots): the output node reads it
+			// and writes the resolved preset out (a[1] = port slot or ev out) scaled
+			// by the PRESET level, the bare `amp` of the event (each card's own
+			// level is `id__amp`). Legacy layout (no \f2chainOut — f2units not
+			// loaded): the last cards write a[1] directly and the plain params go
+			// to the last card; cfgSig |sink0 respawns the pool once f2units is
+			// in. A card with opts spawns its SynthDef VARIANT (chnDef: resolved by
+			// ~f2UnitDef — the base def until the variant is built); external port
+			// inputs address a card as `id__arg` in cfg[\portIns]; telId goes to
+			// the last card (vi 0) — or, for a card that declares `vi`, to EVERY
+			// voice with its index (§smp playheads, SAMPLER.md §3.3) — and buf to
+			// every card that has it. Every node is registered (liveness,
+			// ~f2VPlaying) and units with \tempo are mapped onto the tempo bus.
+			// The proxy has the stack shape (+ sink), so every pool site works as is.
+			if (chn.notNil and: { stk.isNil }) {
+				var vg = Group.new(vgrp, \addToTail);
+				var nodes = IdentityDictionary.new;
+				var outId = if (chn.size > 0) { chn.last[\id] } { nil };
+				var nStage = (cfg[\chainN] ? 0).asInteger;
+				var sb, slot, sink, pamp;
+				// the stage bus covers every slot a card names, even if chainN lags
+				chn.do { |c|
+					nStage = nStage.max((c[\rd] ? (-1)).asInteger + 1).max((c[\wr] ? (-1)).asInteger + 1);
+				};
+				if (hasSink) {
+					sb = top[\f2StackBusAt].(poolKey, (nStage + 1) * nv);   // + the final stage
+				} {
+					if (nStage > 0) { sb = top[\f2StackBusAt].(poolKey, nStage * nv) };
+				};
+				// §bus-guard шина стадии могла НЕ выделиться (пул audio-шин сервера пуст —
+				// ~f2StackBusAt уже сказал об этом вслух и, в отличие от прежнего
+				// поведения, не закэшировал провал). Раньше `sb.index` у nil здесь
+				// поднимал ошибку ПРЯМО В СОБЫТИИ — а ошибка внутри Event:play рвёт
+				// поток паттерна, и строка замолкала целиком и навсегда. Теперь стрип
+				// вырождается: карточки пишут прямо в выход (сумма вместо цепочки),
+				// сток не спавнится (иначе он читал бы собственный выход), нота жива,
+				// и первый же триггер после освобождения шин собирает стрип как надо.
+				slot = { |k| if (sb.isNil) { a[1] } { sb.index + (2 * ((k * nv) + vi)) } };
+				vg.register(true);
+				// `ci` — the card's index in the compiled strip: the playhead
+				// telemetry below rides on it (SAMPLER.md §3.3), nothing else reads it
+				chn.do { |c, ci|
+					var udef = (chnDef !? { chnDef[c[\id]] }) ? c[\unit];
+					var ud = SynthDescLib.global.at(udef);
+					var uc = if (ud.notNil) { ud.controlNames } { [] };
+					var rd = (c[\rd] ? (-1)).asInteger, wr = (c[\wr] ? (-1)).asInteger;
+					var uout = if (wr < 0) { if (hasSink) { slot.(nStage) } { a[1] } } { slot.(wr) };
+					var ua = [\out, uout, \gate, 0, \tel_bus, (ev[\tel_bus] ? 0)];
+					var cbuf, sres;
+					if (rd >= 0) {
+						if (uc.includes(\chainIn)) {
+							ua = ua ++ [\chainIn, slot.(rd)];
+						} {
+							// the compiler marked the card `proc` from a SynthDesc that had
+							// chainIn; the def loaded now (or this variant) lacks it
+							if (ud.notNil) {
+								warnOnce.(("chainIn_" ++ udef.asString).asSymbol,
+									"⚠ [f2 chain] %: card % (%) reads stage % but has no chainIn — stream dropped".format(def, c[\id], udef, rd));
+							};
+						};
+					};
+					if (uc.includes(\i_free)) { ua = ua ++ [\i_free, 0] };
+					// §smp a card's own RESOURCE opt `sample` wins over the preset
+					// buffer (~f2SmpBuf); every other card keeps today's ev[\buf].
+					cbuf = (top[\f2SmpBuf] !? { |f| f.(c[\opts]) }) ? ev[\buf];
+					if (cbuf.notNil and: { uc.includes(\buf) }) { ua = ua ++ [\buf, cbuf] };
+					// §conv-ir a convU card under `ir: sample` reads a PREPARED spectrum
+					// buffer, not the sample itself (PartConv takes no sound file), so its
+					// resource opts resolve through their own cache exactly as the
+					// sampler's analyses do. Pending or unreadable ⇒ the null IR, and the
+					// card passes the source through its wet path rather than dropping out.
+					if (uc.includes(\irBuf) and: { top[\f2ConvIrRes].notNil }) {
+						ua = ua ++ [\irBuf, top[\f2ConvIrRes].(c[\opts])];
+					};
+					// §curve the DRAWN POINT LIST (POLYMER.md §6.8, ENVELOPE.md §2.9):
+					// `curve` names a RENDERED BUFFER PAIR and no graph, so it resolves
+					// here exactly as `irSample` does — one 16384-sample cycle becomes the
+					// 12-level mip bank `osc: scrawl` reads (`curveBuf`, the BASE of a
+					// consecutive range) and the 16385-frame shape `env: segments` reads
+					// (`shapeBuf`). Both are engine args and never knobs, so no card's
+					// control budget moves. An empty `curve` is the schema default and
+					// reads the DEFAULT DRAWING, not buffer 0 — a card nobody has drawn on
+					// sounds. The key handed over is `<preset>|<card>`: the cache is keyed
+					// on the drawing itself (two cards on one curve share one bank), and
+					// this names the card whose voices ~f2CurveSwap moves when a render
+					// that was still in flight at spawn lands.
+					if (top[\f2CurveRes].notNil
+						and: { uc.includes(\shapeBuf) or: { uc.includes(\curveBuf) } }) {
+						var cres = top[\f2CurveRes].(c[\opts],
+							(def.asString ++ "|" ++ c[\id].asString).asSymbol);
+						if (uc.includes(\curveBuf)) { ua = ua ++ [\curveBuf, cres[\curveBuf]] };
+						if (uc.includes(\shapeBuf)) { ua = ua ++ [\shapeBuf, cres[\shapeBuf]] };
+					};
+					// §smp the other RESOURCE opts (SAMPLER.md §6): `slicing slices beatLen
+					// onsetSens pitchSens bpm` name an ANALYSIS, not a graph, so they resolve
+					// to the slice-table buffer here exactly as `sample` resolves to `buf`.
+					// The entry owns that bufnum for the life of the sample — a re-analysis
+					// refills the table IN PLACE, so a note already sounding follows the new
+					// grid and the pool has nothing to respawn for. `bpm: manual` reads the
+					// card's own smpBpm knob ([RN] Automatic BPM Detection off): a live control
+					// cannot key an analysis, so its value at spawn keys the entry instead.
+					if (uc.includes(\sliceBuf) and: { top[\f2SmpRes].notNil }) {
+						sres = top[\f2SmpRes].(c[\opts], cbuf,
+							ev[(c[\id].asString ++ "__smpBpm").asSymbol]);
+						if (sres.notNil) {
+							ua = ua ++ [\sliceBuf, sres[\sliceBuf]];
+							// §4 the pitch curve of the FILE, when this card asked for one
+							// (`rootMode: analyzed`). -1 until the offline pass lands, and
+							// the graph then reads the manual root — so a note played in
+							// that window sounds, it just does not track yet.
+							if (uc.includes(\pitchBuf)) {
+								ua = ua ++ [\pitchBuf, (sres[\pitchBuf] ? -1)];
+							};
+							// §7 the two artefacts Spectral reads and nothing else does
+							// (SAMPLER.md §6): the onset table Preserve Onsets asks «am I
+							// on a transient» of, and the file's FFT frames. Both are -1
+							// until their pass lands — the graph then behaves as if the
+							// switch were off, and a spectral voice whose frames are not
+							// there yet stays SILENT for that note rather than handing
+							// PV_BufRd a bufnum that is not an analysis.
+							if (uc.includes(\onsetBuf)) {
+								ua = ua ++ [\onsetBuf, (sres[\onsetBuf] ? -1)];
+							};
+							if (uc.includes(\fftBuf)) {
+								ua = ua ++ [\fftBuf, (sres[\fftBuf] ? -1)];
+							};
+						};
+					};
+					if (pins.notNil and: { top[\f2PortInSlot].notNil }) {
+						var pre = c[\id].asString ++ "__";
+						pins.keysValuesDo { |k, pn|
+							var ks = k.asString;
+							if (ks.beginsWith(pre)) {
+								var an = ks.copyToEnd(pre.size).asSymbol;
+								if (uc.includes(an)) { ua = ua ++ [an, top[\f2PortInSlot].(pn, vi)] };
+							};
+						};
+					};
+					// §smp playhead telemetry (SAMPLER.md §3.3 / §5): a card that
+					// declares `vi` — samplerU, and nothing else — takes telId in
+					// EVERY voice together with its voice index AND its card index, so
+					// the front can draw one head per voice of THIS card
+					// ('/f2_head' [vi, ci, pos, span, mode]). telId names the preset,
+					// so without `ci` two samplerU cards in one strip (§8 decision 4)
+					// would share one bucket of heads.
+					// Every other card keeps today's rule exactly: telId goes to the
+					// LAST card of voice 0 alone, or the `sc:<dk>` level channel would
+					// flutter between voices.
+					if (cfg[\telId].notNil and: { uc.includes(\telId) }) {
+						if (uc.includes(\vi)) {
+							ua = ua ++ [\telId, cfg[\telId], \vi, vi];
+							if (uc.includes(\ci)) { ua = ua ++ [\ci, ci] };
+						} {
+							if (vi == 0 and: { c[\id] == outId }) { ua = ua ++ [\telId, cfg[\telId]] };
+						};
+					};
+					if (ud.notNil) {
+						var n = Synth(udef, ua, vg, \addToTail);
+						n.register(true);   // liveness (~f2VPlaying): a doneAction:2 card that self-frees marks the voice dead
+						nodes[c[\id]] = tempoMap.(n, uc);
+					} {
+						// §cut the def is not loaded. Skipping the node silently is the
+						// failure we refuse: this card's stage is then never written, so
+						// every card after it reads an empty bus and the preset goes quiet
+						// from here on — which looks exactly like a bypass. ~f2UnitGone
+						// names the unit, the preset, the card and, when the unit was CUT
+						// rather than merely missing, what to rebuild the card on; it posts
+						// once per (preset × unit), so a strip retriggering at 120 bpm says
+						// it one time.
+						if (top[\f2UnitGone].notNil) {
+							top[\f2UnitGone].(c[\unit], def, c[\id]);
+						} {
+							("⚠ [f2 chain] %: card % has no SynthDef % — card skipped, and everything it fed is silent".format(def, c[\id], udef)).postln;
+						};
+					};
+				};
+				if (hasSink and: { sb.notNil }) {   // §bus-guard без шины стадии стока нет
+					// the output node, LAST in the group: final stage → resolved out × preset level
+					pamp = ev[\amp];
+					if (pamp.isNumber.not) { pamp = 1 };
+					sink = Synth(\f2chainOut, [\in, slot.(nStage), \out, a[1], \amp, pamp], vg, \addToTail);
+					sink.register(true);
+				};
+				sy = (grp: vg, nodes: nodes, out: outId, sink: sink);
+			};
+			if (stk.isNil and: { chn.isNil } and: { pins.notNil } and: { top[\f2PortInSlot].notNil }) {
+				pins.keysValuesDo { |argName, pn|
+					if (ctrl.includes(argName)) { a = a ++ [argName, top[\f2PortInSlot].(pn, vi)] };
+				};
+			};
+			// §synth-mod телеметрия: канал `sc:*` пишет ОДИН голос пресета (vi=0),
+			// иначе значения голосов перемежались бы (флаттер канала).
+			if (cfg[\telId].notNil and: { vi == 0 } and: { ctrl.includes(\telId) }) {
+				a = a ++ [\telId, cfg[\telId]];
+			};
+			// §loop-order в СВОЮ подгруппу хвостом: голоса пресета идут по vi, подгруппы —
+			// по defKey ⇒ полный порядок нод воспроизводим при любом порядке онсетов.
+			if (stk.isNil and: { chn.isNil }) {
+				sy = Synth(instr, a, vgrp, \addToTail);
+				sy.register(true);   // assumePlaying=true: свежий голос сразу «жив» (isPlaying), не мёртв до /n_go
+				tempoMap.(sy, ctrl);
+			};
+			sy;
+		};
+
+		// пул: сверяем ГРУППУ по ИДЕНТИЧНОСТИ (===), а не только nodeID в ключе — после redeploy/
+		// hush старая группа освобождена (голоса мертвы), а SC может ПЕРЕВЫДАТЬ тот же nodeID новой
+		// группе → ключ совпал бы, а голоса дохлые (флуд «/n_mapn Node not found»). Иная группа →
+		// свежий пул. (Отдельный мёртвый голос страхуем поштучно ниже.)
+		// §orphan-fix СЛЕПОК cfg (voices+artic) в пуле. Structural-редеплой при смене
+		//   voices/artic сигнатуру меняет, НО §smooth-restart свапает лишь source Pdef и
+		//   НЕ пересоздаёт группу — поэтому старый пул выживал с ПРЕЖНИМ числом голосов.
+		//   При voices 3→1 голоса 1..2 больше не получали событий: если были на gate=1
+		//   (нота/hold) — ЗАЛИПАЛИ навсегда (огибающая «не отпускала», x.set(gate,0) мимо —
+		//   это осиротевший узел, не тот, что видит юзер). Слепок разошёлся → глушим ВСЕ
+		//   узлы старого пула по nodeID (ошибку «нет узла» давим: вдруг группа их уже сняла)
+		//   и строим пул заново под текущий cfg.
+		// §cfg-sig слепок = ВСЁ, что запекается в аргументы спавна (см. mkVoice):
+		// инструмент, маршрут выхода (слот portOut ИЛИ шина ev[\out]), порт-входы,
+		// telId, буфер сэмпла. Раньше здесь были только voices|artic — смена
+		// маршрутизации (outBus → «internal» порт, другой порт, другая fx-шина,
+		// смена синта пресета) честно проходила structural-редеплой и обновляла
+		// ~f2ReuseCfg, но ЖИВЫЕ голоса пула не пересоздавались (слепок совпадал) и
+		// продолжали писать в СТАРУЮ шину до случайной гибели пула (стоп ИХ строки,
+		// hush, смена voices/artic) — «поменял выход, а звучит по-старому,
+		// применилось на N-й перезапуск всего». Теперь любой сдвиг спавн-конфига
+		// пересоздаёт пул на первом же триггере после редеплоя.
+		// Не ловится (осознанно): слот порт-входа зависит ещё и от wv ПИСАТЕЛЯ на
+		// момент спавна — правится сменой voices самого писателя (его же респавн).
+		cfgSig = nv.asString ++ "|" ++ artic.asString
+			++ "|s" ++ instr.asString
+			++ "|o" ++ (cfg[\portOut] ? ev[\out] ? 0).asString
+			++ "|t" ++ (cfg[\telId] ? 0).asString
+			++ "|b" ++ (ev[\buf].tryPerform(\bufnum) ? ev[\buf] ? "").asString
+			// ВНИМАНИЕ: имя арга НЕ `pi` — это зарезервированная константа π в sclang
+			// (лексер отдаёт литерал числа → «syntax error, unexpected PIE»).
+			++ "|i" ++ (cfg[\portIns] !? { |pins|
+				pins.keys.asArray.collect(_.asString).sort.collect { |k|
+					k ++ ":" ++ pins[k.asSymbol].asString
+				}.join(",")
+			} ? "")
+			// §port-guard флаг наличия порт-хелперов НА МОМЕНТ СПАВНА (только для
+			// пресетов с портами): голос, рождённый ДО загрузки f2units, остаётся на
+			// прямом выходе — когда хелперы появляются, слепок расходится и первый же
+			// триггер пересобирает пул уже с настоящей маршрутизацией.
+			++ (if (cfg[\portOut].notNil or: { cfg[\portIns].notNil })
+				{ "|h" ++ top[\f2PortOutSlot].notNil.asString } { "" })
+			// §units-ver a units reload bumps ~f2UnitsVer ⇒ every pool fingerprint
+			// diverges ⇒ pools respawn on their next trigger with the FRESH defs.
+			// Without this, nodes spawned before the reload kept playing the stale
+			// compiled graph — file replaced, sound unchanged, "fix did nothing".
+			++ "|u" ++ (top[\f2UnitsVer] ? 0).asString
+			// §stack the graph itself (units, routes, output) is spawn-baked too
+			++ (stk !? { |st| "|k" ++ st.collect { |u|
+				u[\id].asString ++ ":" ++ u[\unit].asString ++ ":"
+				++ (u[\ins] ? ()).keys.asArray.collect(_.asString).sort.collect { |kk|
+					kk ++ ">" ++ (u[\ins][kk.asSymbol]).asString }.join(",")
+			}.join(";") ++ ">" ++ cfg[\stackOut].asString } ? "")
+			// §cards the strip is spawn-baked too: id:unit:opts:rd:wr per card
+			// (opts = sorted k=v pairs; "@variant" once the variant def is BUILT —
+			// until then the base def is spawned and the pool respawns when the
+			// variant exists), then >chainN and the output-node layout.
+			++ (chn !? { |ch| "|c" ++ ch.collect { |c|
+				var udef = (chnDef !? { chnDef[c[\id]] }) ? c[\unit];
+				c[\id].asString ++ ":" ++ c[\unit].asString ++ ":"
+				++ (c[\opts] !? { |o| o.keys.asArray.collect(_.asString).sort.collect { |kk|
+					kk ++ "=" ++ (o[kk.asSymbol] ? o[kk]).asString }.join(",") } ? "")
+				++ ":" ++ (c[\rd] ? (-1)).asString ++ ":" ++ (c[\wr] ? (-1)).asString
+				++ (if (udef != c[\unit]) { "@" ++ udef.asString } { "" })
+			}.join(";") ++ ">" ++ (cfg[\chainN] ? 0).asString
+			// §cards-out the output-node layout is spawn-baked too (final stage
+			// slot + \f2chainOut vs. the legacy direct write): flips once f2units loads
+			++ (if (hasSink) { "|sink1" } { "|sink0" }) } ? "");
+		pool = voices[poolKey];
+		if (pool.notNil and: { (pool[\grp] !== grp) or: { pool[\cfgSig] != cfgSig } }) {
+			// §cfg-sig SOFT retire. The old voices used to be hard-freed here (n_free
+			// mid-sound = a click on every strip / menu / routing edit). Now they get
+			// gate 0 at once and are freed 0.4 s later (the ~f2FreeSceneVoices
+			// pattern); the pool entry is dropped immediately, so the new pool is
+			// built alongside. A stack/strip pool also owns its stage bus: the
+			// registry entry is detached now (the new pool allocates a fresh bus
+			// instead of sharing slots with the releasing voices — a shared slot
+			// would sum both generations for 0.4 s) and freed with the old voices.
+			var old = pool;
+			var sreg = top[\f2StackBus], sbe = sreg !? { sreg[poolKey] };
+			sbe !? { sreg.removeAt(poolKey); top[\f2StackBusRetire].value(sbe, 0.5) };
+			old[\synths].do { |v|
+				var nid = top[\f2VNode].(v);
+				if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_set, nid, \gate, 0], [\error, 1]) };
+			};
+			SystemClock.sched(0.4, {
+				old[\synths].do { |v|
+					var nid = top[\f2VNode].(v);
+					if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) };
+				};
+				nil
+			});
+			voices.removeAt(poolKey); pool = nil;
+		};
+		if (pool.isNil) {
+			pool = (synths: Array.fill(nv, { |i| mkVoice.(i) }), rr: 0, gen: Array.fill(nv, 0), grp: grp, cfgSig: cfgSig);
+			voices[poolKey] = pool;
+		};
+		// §hold прилипание к ОДНОМУ голосу: пробег смежных ячеек продолжает тот же
+		// голос — один сросшийся гейт без ретригеров (раунд-робин отдавал бы след.
+		// ячейку другому голосу, и отложенный гейт-офф прежнего некому отменить).
+		if (nv <= 1) { idx = 0 } {
+			if (artic == \hold) {
+				idx = pool[\hidx] ? 0;
+			} {
+				idx = pool[\rr]; pool[\rr] = (pool[\rr] + 1) % nv;
+			};
+		};
+		pool[\hidx] = idx;
+		voice = pool[\synths][idx];
+		if (voice.isNil or: { top[\f2VPlaying].(voice).not }) {
+			// §orphan-fix перед заменой глушим прежний узел по nodeID: если isPlaying —
+			//   ложь у ещё ЖИВОГО голоса (register(true) без /n_go), замена в пуле осиротила
+			//   бы звучащий узел (gate завис). Мёртвый узел — ошибка давится, no-op.
+			// §cards a proxy counts as dead when ANY card node self-freed
+			//   (~f2VPlaying); the n_free goes to its GROUP (~f2VNode), so the
+			//   surviving cards and the sink are freed with it — nothing leaks.
+			voice !? { |v| var nid = top[\f2VNode].(v);
+				if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) } };
+			voice = mkVoice.(idx); pool[\synths][idx] = voice; respawned = true;
+		};
+		// §gen-fix КОРНЕВОЙ БАГ (жил с самого §reuse): `arr[i] = v` в sclang возвращает
+		// САМ МАССИВ, а не значение (та же ловушка, что документирована для dict[k]=v).
+		// Из-за `myGen = (pool[\gen][idx] = …)` myGen был МАССИВОМ, и gen-гард
+		// `pool[\gen][idx] == myGen` (число == массив) давал ВСЕГДА false → гейт-офф
+		// резался ВСЕГДА → гейты копились на 1 → залипание. Отсюда и «hold залипал
+		// всегда», и оживление reatk/legato ровно тогда, когда гейт-офф шёл серверным
+		// бандлом БЕЗ гарда, и повторное залипание после возврата гарда в §gate-v3.
+		pool[\gen][idx] = pool[\gen][idx] + 1;
+		myGen = pool[\gen][idx];
+
+		// §h-latch v2 poly sample-and-hold on the GATE. A hold-run continuation
+		// event (same pooled voice, gate still open, not a fresh synth, no channel
+		// gate) must NOT re-pitch the sounding note: the pitch latched at the gate
+		// front holds until the next real gate trigger — melody/tree changes land
+		// on the next attack, never mid-note. Only \freq is frozen; every other
+		// param keeps updating per cell as before. The offAt bookkeeping is
+		// hoisted from the articulation block below so the freq/set sections can
+		// tell a gate-opening event from a continuation.
+		offAtA = pool[\offAt];
+		if (offAtA.isNil) { offAtA = Array.fill(nv, 0); pool[\offAt] = offAtA };
+		nowT = Main.elapsedTime;
+		stillOpen = nowT < (offAtA[idx] ? 0);
+		holdCont = (artic == \hold) and: { stillOpen }
+			and: { cfg[\gateSrc].isNil } and: { (respawned ? false).not };
+
+		// маппинг живых арг → per-cell шины (top.use: внутри ~mbAt живут ~mb/~mbSm)
+		// §map-seed cell-boundary bus handoff: the NEXT cell's bus holds its
+		// base/stale value until the engine's next tick (~16 ms), so a remap
+		// TELEPORTED continuously-scrubbed params (tape grPos burst-played the
+		// wrong spot every cell — the rasp) and blipped any param toward base.
+		// Before remapping, the RAW bus of the new key is seeded with the LIVE
+		// value of the previously mapped bus (getSynchronous, local server), so
+		// the handoff is seamless and the next engine tick simply confirms it.
+		// v2: every seeded key is reported back to the core as /f2_dirty — the
+		// engine forgets its per-key diff and re-sends its OWN value on the next
+		// tick (~16 ms). Without that, a mod whose computed value never changes
+		// (const lock, slow S&H) would keep the seeded neighbour value forever:
+		// the diff would never fire again and the stomp would stick.
+		if (ev[\f2map].notNil) {
+			top.use {
+				var lmAll = pool[\lastMap];
+				var lm, dirty;
+				if (lmAll.isNil) { lmAll = IdentityDictionary.new; pool[\lastMap] = lmAll };
+				lm = lmAll[idx];
+				if (lm.isNil) { lm = IdentityDictionary.new; lmAll[idx] = lm };
+				ev[\f2map].pairsDo { |param, key|
+					var b;
+					if (ctrl.includes(param) and: { (holdCont and: { param == \freq }).not }) {
+						b = ~mbAt.(key);
+						if (b.notNil) {
+							var prev = lm[param];
+							if (prev.notNil and: { prev.index != b.index }) {
+								try {
+									var live = prev.getSynchronous;
+									var raw = ~mbRawAt !? { ~mbRawAt.(key) } ? b;
+									raw.set(live);
+									if (raw.index != b.index) { b.set(live) };
+									dirty = dirty.add(key);
+								};
+							};
+							lm[param] = b;
+							top[\f2VMap].(voice, param, b.index);
+						};
+					};
+				};
+				if (dirty.notNil and: { dirty.size > 0 }) {
+					(~f2CoreAddr ? ~f2BackendAddr ? NetAddr("127.0.0.1", 57121)).sendMsg('/f2_dirty', *dirty);
+				};
+			};
+		};
+		// pitched-синты: как дефолтное событие — \freq получает ~detunedFreq (freq+detune;
+		// §h-latch гармония кладёт сюда ЗАЩЁЛКНУТОЕ на онсете число); фолбэк — ~freq.
+		// §h-latch v2: продолжение hold-пробега питч НЕ трогает (см. holdCont выше).
+		if (ctrl.includes(\freq) and: { holdCont.not }) {
+			var fr = ev.use { try { (~detunedFreq).value } { nil } };
+			if (fr.isNumber.not) { fr = ev.use { try { (~freq).value } { nil } } };
+			if (fr.isNumber) { top[\f2VSet].(voice, [\freq, fr]) };
+		};
+		// статические числовые контролы (не reserved, не в f2map) → set
+		setA = [];
+		ev.keysValuesDo { |k, v|
+			if (reserved.includes(k).not and: { v.isNumber } and: { ctrl.includes(k) }
+				and: { (holdCont and: { k == \freq }).not }) {
+				setA = setA ++ [k, v];
+			};
+		};
+		if (setA.size > 0) { top[\f2VSet].(voice, setA) };
+		// §cell-trig per-cell onset pulse (compiler emits cellTrig only for
+		// grainU presets): fires on EVERY event of the reused voice — including
+		// hold continuations that never re-front the gate — so the tape motor
+		// (grainU mode=1) re-anchors its head to the just-remapped-and-seeded
+		// grPos bus at each musical boundary; tempo-mismatch drift is bounded
+		// to one cell instead of accumulating for bars. t_trig is a TrigControl
+		// (auto-resets after one control block); other units are unaffected
+		// because their cfg carries no cellTrig. §cards: a strip's cfg names its
+		// tape CARDS (`cellTrig: [\smp, \gr]`) and only those nodes are pulsed
+		// (`id__t_trig`; an id without a node is dropped by the demux); a
+		// legacy/stack preset keeps the voice-wide `cellTrig: 1`.
+		if (cfg[\cellTrig].isArray) {
+			top[\f2VSet].(voice, cfg[\cellTrig].collect { |id| [(id.asString ++ "__t_trig").asSymbol, 1] }.flatten);
+		} {
+			if (cfg[\cellTrig] == 1) { top[\f2VSet].(voice, [\t_trig, 1]) };
+		};
+		// АРТИКУЛЯЦИЯ — все три режима: gate=1 + ОТЛОЖЕННЫЙ гейт-офф с gen-guard. Соседняя ячейка
+		// ТОГО ЖЕ голоса бампает gen; её гейт-офф отменяет прошлый (перекрытия не режутся). Режим —
+		// это ТОЛЬКО момент гейт-оффа относительно границы ячейки (dur):
+		//   reattack — гейт-офф ДО онсета след. (зазор dur·0.85): на след. ячейке gate 0→1 = чёткая
+		//              РЕ-АТАКА с воздухом (перкуссивно/стаккато).
+		//   legato   — гейт-офф ЧУТЬ РАНЬШЕ границы (dur−ε, ε мал): огибающая ре-триггерится каждую
+		//              ячейку, но БЕЗ слышимой тишины (связно) — sus-синты не залипают.
+		//   hold     — гейт-офф ЧУТЬ ПОЗЖЕ границы (dur+ε): соседняя ячейка ТОГО ЖЕ синта приходит
+		//              на границе (раньше) и отменяет его → один СРОСШИЙСЯ гейт через весь пробег
+		//              смежных ячеек одного синта (gate ×N); релиз только на паузе \x или на границе
+		//              с ДРУГИМ синтом (там этот голос новых нот не получает → отменять некому).
+		//   Модуляции: preset-scope тянется непрерывно (окно скоупа не рвётся), cell-scope
+		//   сбрасывается пере-маппингом голоса на шину новой ячейки (выше) — «cell scope — исключение».
+		// §synth-mod КАНАЛЬНЫЙ гейт (cfg[\gateSrc] = SC-ключ шины): \gate голоса
+		// замаплен на шину — открытие/закрытие пишет ядро (контракт: источник
+		// исчез → ядро шлёт 0, гейт закрыт). События клеток тогда НЕ трогают
+		// gate/sched — они возят параметры/питч и держат окна модуляций.
+		if (cfg[\gateSrc].notNil) {
+			top.use {
+				var gb = ~mbAt.(cfg[\gateSrc]);
+				if (gb.notNil) { top[\f2VMap].(voice, \gate, gb.index) };
+			};
+		} {
+			// §gate-v3 ЖИЗНЕННЫЙ ЦИКЛ ГЕЙТА, устойчивый к ПЕРЕКРЫТИЯМ (полифония, параллельные
+			// ряды одного пресета, плотные сетки). Три болезни прежних версий:
+			//   1) совпавший онсет на ОТКРЫТЫЙ голос: set(gate,1) при gate=1 — НЕТ ФРОНТА,
+			//      EnvGen не ретриггерит → нота «пропадает в никуда»;
+			//   2) застрявший на 1 гейт (потерянный офф): перкуссионная огибающая (sus 0)
+			//      затихла, все дальнейшие 1→1 немы → голос МЁРТВ, «каждый кратный триггер
+			//      пропадает» (раунд-робин отдаёт ему каждую nv-ю ноту);
+			//   3) слепой (без gen-гарда) серверный офф: сталый офф соседней ячейки убивал
+			//      свежую ноту ТОГО ЖЕ голоса при перекрытии.
+			// Решение: язык ПЛАНИРУЕТ офф (двое часов, TempoClock+SystemClock) с gen-гардом
+			// (бамп gen на онсете отменяет сталые оффы; двойной сброс идемпотентен), доставка —
+			// серверным бандлом БЕЗ isPlaying (ложный false глотал офф — прежнее залипание).
+			// Онсет: если по бухгалтерии offAt голос ЕЩЁ ОТКРЫТ — микро-дип (gate 0 сейчас,
+			// gate 1 бандлом через 4 мс) вместо немого 1→1; иначе обычный set. Самоисцеление:
+			// даже при ошибочной бухгалтерии оффы этого цикла закроют гейт к концу ячейки —
+			// следующий онсет получит фронт.
+			// offAtA/nowT/stillOpen live in the outer scope now (§h-latch v2 needs
+			// the gate-front decision before the freq/set sections above).
+			var beatDur = TempoClock.default.beatDur;
+			durB = (ev[\dur] ? 1).max(0.05);
+			susBeats = if (artic == \hold)
+				{ durB + 0.03 }
+				{ if (artic == \legato) { (durB - 0.008).max(0.02) } { durB * (ev[\legato] ? 0.85) } };
+			offAtA[idx] = nowT + (susBeats * beatDur);
+			if (stillOpen and: { artic != \hold }) {
+				s.sendBundle(nil,   [\error, 0], [\n_set, top[\f2VNode].(voice), \gate, 0], [\error, 1]);
+				s.sendBundle(0.004, [\error, 0], [\n_set, top[\f2VNode].(voice), \gate, 1], [\error, 1]);
+			} {
+				top[\f2VSet].(voice, [\gate, 1]);
+			};
+			gateOff = {
+				if (pool[\gen][idx] == myGen) {
+					s.sendBundle(nil, [\error, 0], [\n_set, top[\f2VNode].(voice), \gate, 0], [\error, 1]);
+				};
+				nil
+			};
+			TempoClock.default.sched(susBeats, gateOff);
+			SystemClock.sched((susBeats * beatDur).max(0.005), gateOff);
+		};
+	});
+
+	~play = { |key, data, dur=4, quant=4, layers|
+		var grp = if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying })
+			{ ~f2PatGroup } { s.defaultGroup };
+		var basePat = Pn(~toPat.value(data, dur), inf);
+		var pattern, final;
+		// Layer system: independent layers merged per-event via Prout zipper.
+		// Can't use Pchain — ~toPat yields complete events that ignore inval.
+		// Can't use Plazy — variable capture on reassigned `pattern` breaks stream.
+		// Solution: direct Prout with .keys.includes check (Event proto has defaults
+		// like degree:0, scale:major — must check own keys, not [k].isNil).
+		// Pn(Prout, inf) restarts all streams each cycle.
+		if (layers.notNil and: { layers.isKindOf(Array) and: { layers.size > 0 } }) {
+			var validLayers = layers.select(_.isKindOf(Pattern));
+			if (validLayers.size > 0) {
+				pattern = Prout({ |inval|
+					var ms = basePat.asStream;
+					var ls = validLayers.collect(_.asStream);
+					var ev;
+					ev = ms.next(inval);
+					while { ev.notNil } {
+						// Only merge layers for non-rest events.
+						// Rests pass through — melody pointer stays put.
+						if (ev[\type] != \rest) {
+							ls.do { |layerStream|
+								var le = layerStream.next(ev);
+								if (le.notNil and: { le.isKindOf(Event) }) {
+									le.keysValuesDo { |k, v|
+										if (v.notNil) {
+											if (ev.keys.includes(k).not) { ev.put(k, v) };
+										};
+									};
+								};
+							};
+						};
+						inval = ev.yield;
+						ev = ms.next(inval);
+					};
+				});
+				pattern = Pn(pattern, inf);
+			} {
+				pattern = basePat;
+			};
+		} {
+			pattern = basePat;
+		};
+		// Cell telemetry: send f2_cid via OSC before enriching
+		~f2CellAddr = ~f2CellAddr ?? { NetAddr("127.0.0.1", 57130) };
+		final = Pcollect({ |ev|
+			var cid = ev[\f2_cid];
+			if (cid.notNil) {
+				try { ~f2CellAddr.sendMsg('/f2_cell', cid) } {};
+				ev.removeAt(\f2_cid);
+			};
+			~enrich.value(ev)
+		}, pattern);
+		"[f2] ~play.(\\%, dur:%, group:%)".format(key, dur, grp.nodeID).postln;
+		// §sync quant САМОГО Pdef-прокси (не только плеера): подмена source при РЕДЕПЛОЕ
+		// планируется по Pdef.quant, а не по аргументу .play. Дефолт (1 бит) свапал новый
+		// цикл на ЛЮБОМ бите → origin SC ≠ origin движка (frac(beat/dur)) → окна модуляции
+		// съезжали на (бит свапа mod dur) НАВСЕГДА: слышимая ячейка получала только базу
+		// (knob), модуляция составлялась для чужой. Свап строго на границе ПЕТЛИ строки —
+		// та же сетка, на которой движок вводит отложенную структуру (§smooth-restart).
+		Pdef(key).quant_(quant);
+		Pdef(key, final).play(TempoClock.default,
+			(group: grp, addAction: \addToHead), quant);
+	};
+
+	~enrich = { |ev|
+		var r = globalEnv.at(\rack);
+		var res = ev.copy;
+		var instr = res[\instrument];
+		var samplesDict = globalEnv.at(\samples) ?? { Dictionary.new };
+		var defsDict = globalEnv.at(\defs) ?? { Dictionary.new };
+		var modalDict = globalEnv.at(\modalBuffers) ?? { Dictionary.new };
+
+		// 1. MERGE DEFAULTS FIRST
+		var defResolved = false;
+		if (res[\type] != \rest) {
+			if (instr.notNil and: { defsDict[instr].notNil }) {
+				var def = defsDict[instr];
+				res = def.copy.putAll(res);
+				if (def[\instrument].notNil) {
+					res[\instrument] = def[\instrument];
+					instr = res[\instrument];
+					defResolved = true;
+				};
+			};
+		};
+
+		// 2. Audio Samples handling
+		// Skip if: defs resolved instrument, OR instrument has a SynthDesc (is a real synth)
+		if (defResolved.not and: { instr.notNil } and: { samplesDict[instr].notNil }) {
+			if (SynthDescLib.global.synthDescs[instr].notNil) {
+				// instr is a real SynthDef — don't replace with gran
+				"[f2 enrich] % is a SynthDef, skipping sample override".format(instr).postln;
+			} {
+				res[\buf] = samplesDict[instr];
+				res[\instrument] = \gran;
+				instr = \gran;
+			};
+		};
+
+		// 3. Modal Data Injection
+		if (res[\material].notNil and: { modalDict[res[\material]].notNil }) {
+			var buffs = modalDict[res[\material]];
+			res[\f] = buffs[\f];
+			res[\a] = buffs[\a];
+			res[\d] = buffs[\d];
+		};
+		// Fallback
+		if (instr.notNil and: { modalDict[instr].notNil }) {
+			var buffs = modalDict[instr];
+			res[\f] = buffs[\f]; res[\a] = buffs[\a]; res[\d] = buffs[\d];
+		};
+
+		res[\out] = r.bus.main.index;
+		res[\tel_bus] = r.bus.tel.index;
+
+		// 4a. Self-freeing synths (DetectSilence / doneAction:2):
+		// modalS kills itself via DetectSilence. But SC Event also sends
+		// gate:0 after 'sustain' seconds → /n_set on dead node → error.
+		// And long decayScale causes node accumulation.
+		//
+		// Fix: sustain = dur (SC sends harmless gate:0 right when next note starts).
+		// Safety n_free scheduled slightly after, error-suppressed.
+		// No more timing races, no abrupt cuts.
+		{
+			var maxLife, prevCb, safetyTime;
+			if (res[\selfFree] == true) {
+				maxLife = (res[\dur] ?? 1) * TempoClock.default.beatDur;
+				// Safety: actual synth life depends on decayScale, NOT on dur
+				safetyTime = ((res[\decayScale] ?? 1.0) * 1.5).max(maxLife) + 2.0;
+				prevCb = res[\callback];
+				res[\sustain] = maxLife;
+				res[\sendGate] = false;
+				res.removeAt(\selfFree);
+				res[\callback] = { |ev|
+					prevCb.value(ev);
+					if (ev[\id].notNil and: { ev[\type] != \rest }) {
+						// Safety net: generous, synths self-free via doneAction:2
+						SystemClock.sched(safetyTime, {
+							ev[\id].asArray.do { |id|
+								s.sendBundle(nil,
+									[\error, 0],
+									[\n_free, id],
+									[\error, 1]
+								);
+							};
+						});
+					};
+				};
+			};
+		}.value;
+
+		// 4. FX Param Locks (error-safe: skip bad params with warning)
+		// Reserved: setting these via Ndef.set breaks proxy routing/volume
+		{
+			var ndefReserved = Set[\amp, \out, \i_out, \gate, \fadeTime, \in, \tel_bus, \bus, \group, \addAction, \server, \instrument, \type, \dur, \sustain, \sendGate, \callback, \finish, \selfFree, \id, \freq, \midinote, \note, \degree];
+			globalEnv.at(\dsl).fxTargets.keysValuesDo { |key, ndefName|
+				if (res[key].notNil) {
+					var val = res[key];
+					var prevFunc = res[\finish];
+					res[\finish] = {
+						prevFunc.value;
+						try {
+							if (val.isKindOf(Event)) {
+								// Safe pair-level iteration (asPairs.select was broken — misaligned pairs)
+								var safePairs = [];
+								val.keysValuesDo { |k, v|
+									if (ndefReserved.includes(k).not and: { v.notNil and: { v.isNumber } }) {
+										safePairs = safePairs ++ [k, v];
+									};
+								};
+								if (safePairs.size > 0) {
+									"[f2 fxLock] % → Ndef(%) .set(%)".format(key, ndefName, safePairs).postln;
+									Ndef(ndefName).set(*safePairs);
+								};
+							} {
+								if (val.isNumber and: { ndefReserved.includes(key).not }) {
+									Ndef(ndefName).set(key, val)
+								};
+							};
+						} { |err|
+							"[f2 warn] FX param lock %: % — skipped".format(key, err.errorString).postln;
+						};
+					};
+					res.removeAt(key);
+				}
+			};
+		}.value;
+
+		// §reuse: постоянный голос вместо спавна-на-ноту. Условия: тумблер вкл, не rest, есть
+		//   cfg пресета (res[\f2def] из дефа), синтдеф гейтовый, и это НЕ гармонический голос
+		//   (detunedFreq → voice-шина, иной путь). \f2voice берёт голос из пула (см. addEventType).
+		// §cards-orphan a COMPOSITE preset (instrument \chain / \stack) has no
+		//   SynthDef of its own, so \f2voice is its ONLY spawn path — it takes
+		//   that road whatever the ~f2Reuse toggle says and whatever the cfg
+		//   carries. Without this the default event type asks the server for a
+		//   def literally named "chain": the post window fills with
+		//   «FAILURE IN SERVER /s_new SynthDef not found» + «/n_set Node N not
+		//   found» pairs that name neither the preset nor the cause. \f2voice
+		//   plays an empty strip instead and says once what is wrong (the cfg
+		//   line came from an engine older than §cards — rebuild core/f2core).
+		if (res[\type] != \rest and: { #[\chain, \stack].includes(res[\instrument]) }
+			and: { res[\f2def].notNil }) {
+			res[\f2cfg] = (globalEnv.at(\f2ReuseCfg) ? IdentityDictionary.new)[res[\f2def]];
+			res[\f2hasFree] = false;
+			res[\type] = \f2voice;
+		};
+		if ((globalEnv.at(\f2Reuse) ? true) and: { res[\type] != \rest }
+			and: { res[\type] != \f2voice }
+			and: { res[\f2def].notNil }) {
+			var rcfg = (globalEnv.at(\f2ReuseCfg) ? IdentityDictionary.new)[res[\f2def]];
+			var rsd = SynthDescLib.global.at(res[\instrument]);
+			// §artic ЛЮБОЙ гейтовый синт идёт через \f2voice — иначе артикуляция
+			//   reatk/legato/hold и пул голосов вообще не действуют (прежний гард
+			//   требовал ещё и \i_free, и ВСЕ проектные синты без него играли
+			//   спавном — «режимы не различаются»). Синт БЕЗ \i_free
+			//   самоосвобождается по релизу: пул это видит (isPlaying) и пересоздаёт
+			//   голос — для reatk/legato это эквивалент спавна, зато hold СРАЩИВАЕТ
+			//   пробег смежных ячеек (гейт внутри пробега не падает — синт жив).
+			//   Гармонические пресеты (detunedFreq) больше не исключаются: частота
+			//   защёлкнута числом на онсете (§h-latch), голосу reuse не мешает.
+			// §stack a composite preset has no SynthDef of its own (instrument
+			// \stack): its cfg carries the sub-unit list and \f2voice spawns the
+			// group — reuse-eligible by construction. §cards strips (instrument
+			// \chain, cfg[\chain]) take the same road.
+			if (rcfg.notNil and: { rcfg[\stack].notNil or: { rcfg[\chain].notNil }
+				or: { rsd.notNil and: { rsd.controlNames.includes(\gate) } } }) {
+				res[\f2cfg] = rcfg;
+				res[\f2hasFree] = rsd.notNil and: { rsd.controlNames.includes(\i_free) };
+				res[\type] = \f2voice;
+			};
+		};
+		res;
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// D2. LAYER SYSTEM — Independent Pchain layers
+	// ═══════════════════════════════════════════════════════════
+	//
+	// Three-tree architecture:
+	//   Tree 1 (main)     — rhythm + presets → full events with dur (existing ~toPat)
+	//   Tree 2 (melody)   — degree/scale/root → value stream, cycles independently
+	//   Tree 3 (dynamics) — amp/sustain/articulation → value stream, cycles independently
+	//
+	// Layers are compiled via ~toValPat (no dur) and wrapped in Pbind.
+	// Pchain merges them: main tree provides dur/instrument, layers provide
+	// degree, amp, etc. Each layer cycles at its own rate — a 5-note melody
+	// over a 16-step rhythm creates polyrhythmic interplay.
+	//
+	// Usage:
+	//   ~play.(\track, mainTree, 16, 4, [
+	//       ~layer.(\degree, ~q[0, 3, 5, 7, 2]),
+	//       ~layer.(\amp, ~q[1.0, 0.5, 0.8, 0.3])
+	//   ]);
+	//
+	//   // With scale changes:
+	//   ~play.(\track, mainTree, 16, 4, [
+	//       ~mlayer.(~q[
+	//           ~m[~q[0, 2, 4, 7], (scale: Scale.minor)],
+	//           ~m[~q[5, 3, 1, 0], (scale: Scale.major, root: 3)]
+	//       ])
+	//   ]);
+	//
+	// ═══════════════════════════════════════════════════════════
+
+	// ~toValPat: compile DSL tree → Pattern of bare values (no dur)
+	// Same operators as ~toPat, but atoms produce values, not timed events.
+	// Structure nodes control ORDER of values, not their timing.
+
+	~toValPat = { |obj|
+		if (obj.isNil) { Pseq([Rest()], 1) }
+		{
+		if (obj.isKindOf(Function)) {
+			Plazy({ ~toValPat.value(obj.value) })
+		}
+		{
+		if (obj.isKindOf(Event) and: { obj[\dsl_type].notNil }) {
+			var type = obj[\dsl_type];
+
+			case
+
+			// ─── STRUCTURE ───
+
+			{ type == \seq } {
+				var list = obj[\list];
+				if (list.isNil or: { list.size == 0 }) {
+					Pseq([Rest()], 1)
+				} {
+					Pseq(list.collect { |item| ~toValPat.value(item) }, 1)
+				}
+			}
+			{ type == \par } {
+				// par in value context = chord (simultaneous notes)
+				var list = obj[\list];
+				if (list.every(_.isNumber)) {
+					// Pure numbers → array-as-degree (SC plays chord)
+					Pseq([list], 1)
+				} {
+					// Mixed content → Ptuple (parallel value streams)
+					Ptuple(list.collect { |item| ~toValPat.value(item) }, 1)
+				}
+			}
+			{ type == \bind } {
+				// ~m in value context: head provides core values,
+				// modifiers add extra keys (scale, root, octave, etc.)
+				Plazy({
+					var head = obj[\head];
+					var params = obj[\args];
+					var pureParams, headStream, headLen, mods, headPat;
+
+					// Function modifiers wrap the head first (same as ~toPat)
+					params.do { |p|
+						if (p.isKindOf(Function)) {
+							head = try { p.(head) } { |err|
+								"[f2 warn] layer bind mod fn: %".format(err.errorString).postln;
+								head
+							};
+						};
+					};
+
+					pureParams = params.reject(_.isKindOf(Function));
+					headStream = ~toValPat.value(head);
+
+					// Count the length of the head if it's a ~q (for Pn cycling)
+					headLen = inf;
+					if (head.isKindOf(Event) and: { head[\dsl_type] == \seq }) {
+						headLen = head[\list].size;
+					};
+					if (head.isKindOf(Event) and: { head[\dsl_type] == \rep }) {
+						headLen = head[\times] ? 2;
+					};
+
+					// Build modifiers as Pbind layers
+					mods = pureParams.collect { |p|
+						if (p.isKindOf(Event) and: { p[\dsl_type].notNil }) {
+							// Nested DSL node as modifier
+							var mtype = p[\dsl_type];
+							if (#[\pick, \ramp, \osc, \drift, \slew, \stepR, \lfoR, \envR].includes(mtype)) {
+								// Modulation nodes already produce Pbind(\param, stream)
+								// Reuse ~toPat — they don't need dur anyway
+								~toPat.value(p, 1)
+							} {
+								// Structure node as modifier → value stream for \degree
+								Pbind(\degree, ~toValPat.value(p))
+							}
+						} {
+							if (p.isKindOf(Event)) {
+								// Raw event modifier → Pbind of all keys
+								Pbind(*p.asPairs)
+							} {
+								if (p.isNumber) {
+									Pbind(\degree, p)
+								} {
+									if (p.isKindOf(Pattern)) { p }
+									{ Pbind() }
+								}
+							}
+						}
+					};
+
+					// Wrap head value stream as Pbind(\degree, ...)
+					// headStream yields bare values → map to \degree key
+					headPat = Pbind(\degree, headStream);
+
+					if (mods.size > 0) {
+						// headPat (degree from head) has HIGHER priority,
+						// but mods can add scale, root, octave, etc.
+						Pchain(headPat, *mods)
+					} { headPat }
+				})
+			}
+			{ type == \wseq } {
+				// Weighted sequence in value context:
+				// weight → repeat count (rounded to integer, min 1)
+				var pairs = obj[\pairs];
+				Pseq(pairs.collect { |pair|
+					var val = pair[0], w = pair[1].round.asInteger.max(1);
+					Pn(~toValPat.value(val), w)
+				}, 1)
+			}
+			{ type == \rand } {
+				Plazy({ ~toValPat.value(obj[\list].choose) })
+			}
+			{ type == \wrand } {
+				Plazy({
+					var pairs = obj[\pairs];
+					var items = pairs.collect(_[0]);
+					var weights = pairs.collect(_[1]).normalizeSum;
+					~toValPat.value(items.wchoose(weights))
+				})
+			}
+			{ type == \rep } {
+				var times = obj[\times] ? 2;
+				Pn(~toValPat.value(obj[\item]), times)
+			}
+
+			// ─── MODULATION (reuse ~toPat — they already produce Pbind, no dur) ───
+
+			{ type == \pick } { ~toPat.value(obj, 1) }
+			{ type == \ramp } { ~toPat.value(obj, 1) }
+			{ type == \fxRamp } { ~toPat.value(obj, 1) }
+			{ type == \osc }  { ~toPat.value(obj, 1) }
+			{ type == \drift } { ~toPat.value(obj, 1) }
+			{ type == \slew }  { ~toPat.value(obj, 1) }
+			{ type == \stepR } { ~toPat.value(obj, 1) }
+			{ type == \lfoR }  { ~toPat.value(obj, 1) }
+			{ type == \envR }  { ~toPat.value(obj, 1) }
+
+			// ─── FALLBACK ───
+			{ true } { Pseq([Rest()], 1) };
+		}
+
+		// ─── NON-DSL OBJECTS ───
+		{
+			if (obj.isKindOf(Pattern)) { obj }
+			{
+			if (obj.isKindOf(Array)) {
+				// Array: if all numbers → chord, else → sequence
+				if (obj.every(_.isNumber)) {
+					Pseq([obj], 1)
+				} {
+					Pseq(obj.collect { |item| ~toValPat.value(item) }, 1)
+				}
+			}
+			{
+				if (obj.isKindOf(Symbol)) {
+					// Symbols in value context (scale names, etc.)
+					if (obj == \x) { Pseq([Rest()], 1) }
+					{ Pseq([obj], 1) }
+				}
+				{
+					if (obj.isNumber) {
+						Pseq([obj], 1)
+					}
+					{
+						if (obj.isKindOf(Event)) {
+							// Raw event → pass through as partial event
+							Pseq([obj], 1)
+						}
+						{ Pseq([obj], 1) }
+					}
+				}
+			}
+			}
+		}
+		}
+		}
+	};
+
+	// ~layer: wrap a DSL value tree into an infinite Pbind layer
+	// key: event key to fill (\degree, \amp, \sustain, etc.)
+	//      if nil, tree must produce Events (via ~m with modifiers)
+	// tree: DSL tree using standard operators (~q, ~r, ~w, ~n, ~c, ~m)
+	// Returns: infinite-cycling Pattern suitable for Pchain with ~play
+	//
+	// Examples:
+	//   ~layer.(\degree, ~q[0, 3, 5, 7])
+	//   ~layer.(\amp, ~q[1.0, 0.5, 0.8, 0.3, 1.0, 0.2])
+	//   ~layer.(\degree, ~r[~q[0,2,4], ~q[0,3,7], ~q[0,5,9]])
+	//   ~layer.(\degree, ~w[0, 3, 3, 1, 5, 2])
+	//   ~layer.(nil, ~m[~q[0,2,4,7], (scale: Scale.minor)])
+
+	~layer = { |key, tree|
+		var valPat = Pn(~toValPat.value(tree), inf);
+		if (key.notNil) {
+			Pbind(key, valPat)
+		} {
+			// Tree produces Events directly (via ~m with modifiers)
+			// Already contains key mappings
+			valPat
+		}
+	};
+
+	// ~mlayer: melody layer — degree tree + optional scale/root/octave
+	// Convenience for the most common layer type.
+	//
+	// Examples:
+	//   ~mlayer.(~q[0, 3, 5, 7, 2])
+	//   ~mlayer.(~q[0, 3, 5, 7], Scale.minor, 0, 4)
+	//   ~mlayer.(~q[
+	//       ~m[~q[0, 2, 4, 7], (scale: Scale.minor)],
+	//       ~m[~q[5, 3, 1, 0], (scale: Scale.major, root: 3)]
+	//   ])
+
+	~mlayer = { |degreeTree, scale, root, octave|
+		var binds = [\degree, Pn(~toValPat.value(degreeTree), inf)];
+		if (scale.notNil) { binds = binds ++ [\scale, scale] };
+		if (root.notNil) { binds = binds ++ [\root, root] };
+		if (octave.notNil) { binds = binds ++ [\octave, octave] };
+		Pbind(*binds)
+	};
+
+	// ~dlayer: dynamics layer — articulation tree for amp/sustain/stretch
+	// Provides named articulation presets that map to concrete param values.
+	//
+	// Articulation atoms:
+	//   \hit    → (amp: 1.0)                    — normal
+	//   \ghost  → (amp: 0.15)                   — barely audible
+	//   \accent → (amp: 1.3)                    — emphasis
+	//   \duck   → (amp: 0, sustain: 0.001)      — negative space
+	//   \choke  → (sustain: 0.05)               — cut short
+	//   \swell  → (amp: ramp 0.3→1.0)           — within-step crescendo
+	//   number  → (amp: number)                  — direct amp value
+	//
+	// Examples:
+	//   ~dlayer.(~q[\hit, \hit, \accent, \ghost, \duck, \hit, \ghost, \hit])
+	//   ~dlayer.(~q[1.0, 0.5, 1.2, 0.3])
+	//   ~dlayer.(~r[\hit, \accent, \ghost])
+
+	~articulationMap = Dictionary.newFrom([
+		\hit,    (amp: 1.0),
+		\ghost,  (amp: 0.15),
+		\accent, (amp: 1.3),
+		\duck,   (amp: 0, sustain: 0.001),
+		\choke,  (sustain: 0.05),
+		\soft,   (amp: 0.4),
+		\mf,     (amp: 0.7),
+		\ff,     (amp: 1.5)
+	]);
+
+	~dlayer = { |tree|
+		// Compile tree to value stream, then map articulation symbols to events
+		var valPat = Pn(~toValPat.value(tree), inf);
+		Pcollect({ |val|
+			var mapped;
+			if (val.isKindOf(Symbol)) {
+				mapped = ~articulationMap[val];
+				if (mapped.notNil) { mapped.copy } { () }
+			} {
+				if (val.isNumber) { (amp: val) }
+				{
+					if (val.isKindOf(Event)) { val }
+					{ () }
+				}
+			}
+		}, valPat)
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// E. TEMPLATE MACRO
+	// ═══════════════════════════════════════════════════════════
+
+	~mkTemplate = { |... variants|
+		{ |fill, variant, modul|
+			var expanded = variants.collect { |vFunc|
+				var inner = vFunc.value(fill);
+				if (modul.notNil) { ~m[inner, modul] } { inner };
+			};
+			if (variant.notNil) { expanded[variant] } { expanded.choose }
+		}
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// F. GEOMETRY & POSITION HELPERS
+	// ═══════════════════════════════════════════════════════════
+
+	~geoUtil = (
+		calcOffset: { |self, shape, phase, radius|
+			var angle = phase * 2pi;
+			var dx = 0, dy = 0;
+			switch(shape,
+				\circle, { dx = cos(angle); dy = sin(angle); },
+				\line,   { dx = (phase - 0.5) * 2; dy = 0; },
+				\tri,    { var q = (phase*3).round(1)%3; var a=(q*(2pi/3))-(pi/2); dx=cos(a); dy=sin(a); },
+				\square, { var q = (phase*4).round(1)%4; dx=case{q==0}{-1}{q==1}{1}{q==2}{1}{q==3}{-1}; dy=case{q==0}{1}{q==1}{1}{q==2}{-1}{q==3}{-1}; },
+				\pent,   { var q = (phase*5).round(1)%5; var a=(q*(2pi/5))-(pi/2); dx=cos(a); dy=sin(a); },
+				\hex,    { var q = (phase*6).round(1)%6; var a=(q*(2pi/6)); dx=cos(a); dy=sin(a); },
+				\x,      { var q = (phase*4).round(1)%4; dx=case{q==0}{0}{q==1}{1}{q==2}{0}{q==3}{-1}; dy=case{q==0}{1}{q==1}{0}{q==2}{-1}{q==3}{0}; },
+				\star,   { var st=5; var ps=phase*st; var idx=floor(ps); var in=(ps%1)>0.5; var r=if(in){0.4}{1.0}; var a=(idx*(2pi/st))-(pi/2); if(in){a=a+(pi/st)}; dx=cos(a)*r; dy=sin(a)*r; },
+				\spiral, { var t=3; var r=phase; var a=phase*2pi*t; dx=cos(a)*r; dy=sin(a)*r; }
+			);
+			[dx * radius, dy * radius]
+		}
+	);
+
+	~geo = { |center, shape=\circle, points=4, radius=0.2, mode=\wide|
+		var c = center ?? [0.5, 0.5];
+		var phases = Array.fill(points, { |i| i / points });
+		phases.collect { |p|
+			var p1 = p;
+			var p2 = switch(mode, \pair, {p+0.02}, \wide, {p+0.5}, \ortho, {p+0.25}, \tri, {p+0.33}, {p+0.5});
+			var d1 = ~geoUtil.calcOffset(shape, p1, radius);
+			var d2 = ~geoUtil.calcOffset(shape, p2, radius);
+			[(c[0]+d1[0]).clip(0,1), (c[1]+d1[1]).clip(0,1), (c[0]+d2[0]).clip(0,1), (c[1]+d2[1]).clip(0,1)]
+		}
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// G. SEQUENCER RECIPES
+	// ═══════════════════════════════════════════════════════════
+
+	~sRUp = { |instr, len=8|
+		~m[ ~n[instr, len],
+			~ramp[\amp, 0.15, 1.0, \exp],
+			~ramp[\pan, -1, 1],
+			~ramp[\drive, 1, 20]
+		]
+	};
+
+	~sRDown = { |instr, len=6|
+		~m[ ~n[instr, len],
+			~ramp[\amp, 0.8, 0.05, \exp],
+			~osc[\pan, [0, -0.5, 0.5, -0.8, 0.8, -1]],
+			~ramp[\rate, 1.0, 1.8, \exp]
+		]
+	};
+
+	~sRattle = { |instr, len=16, durStart=1.0, durEnd=0.5, dyn=0.5|
+		var baseAmp = (instr[\amp] ?? 0.8);
+		~m[ ~n[instr, len],
+			~ramp[\stretch, durStart, durEnd, \exp],
+			~osc[\amp, [baseAmp, baseAmp * (1.0 - dyn)]],
+			~ramp[\rub, 0.0, 0.2, \rand]
+		]
+	};
+
+	~sRBurn = { |instr, len=16|
+		~m[ ~n[instr, len],
+			(stretch: 0.5, amp: 0.9),
+			~ramp[\drive, 10, 50, \exp],
+			~ramp[\pan, -0.2, 0.2, \rand]
+		]
+	};
+
+	~sRChaos = { |instr, len=8|
+		~m[ ~n[instr, len],
+			~ramp[\stretch, 0.2, 1.5, \rand],
+			~ramp[\amp, 0.2, 1.0, \rand],
+			~ramp[\pan, -1.0, 1.0, \rand]
+		]
+	};
+
+	~sAutoDefault = Routine {
+		loop {
+			yield(~sRUp); yield(~sRDown); yield(~sRattle);
+			yield(~sRBurn); yield(~sRChaos);
+		}
+	};
+
+	~sAuto = { |instr, len=8, logic|
+		var routine = logic ?? ~sAutoDefault;
+		var func = routine.next;
+		if(func.isNil) { routine.reset; func = routine.next ?? ~sRUp; };
+		func.value(instr, len);
+	};
+
+	~sAutoDefault.reset;
+
+	// ═══════════════════════════════════════════════════════════
+	// G2. TELEMETRY HELPER
+	// ═══════════════════════════════════════════════════════════
+	//
+	// Call inside SynthDef body — produces UGen graph at compile time.
+	// Format: [synthType, colorID, env, amp, pan, posX, posY, p0, p1, p2, p3]
+	//
+	// Classes:
+	//   positioned (foldS, pluckS, modalS): posX=srcX, posY=srcY
+	//   simple     (kickS, snareS, hatS):  posX=pan→[0,1], posY=freq→[0,1]
+	//   tonal      (clayPS, amS):          posX=pan→[0,1], posY=freq→[0,1]
+
+	~mkTel = { |synthType, colorID, env, amp, pan, posX, posY,
+		p0=0, p1=0, p2=0, p3=0, telBus|
+		SendReply.kr(Impulse.kr(30), '/f2_tel',
+			[synthType, colorID, env, amp, pan, posX, posY, p0, p1, p2, p3]);
+		Out.kr(telBus, [env, posX, posY, p0]);
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// G3. DENSITY ENGINE — palettes, layers, stacking
+	// ═══════════════════════════════════════════════════════════
+
+	~pal = ();
+
+	// basic: repeat voice, ghost on high density
+	~pal[\basic] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { v }
+		{ d <= 3 } { ~n[v, d] }
+		{ true }   { ~n[~r[v, g, v], d] }
+	};
+
+	// fill: micro-fills with accent toward end
+	~pal[\fill] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { v }
+		{ d <= 3 } {
+			~m[~q[v, g, v], ~osc[\amp, [0.5, 0.3, 0.1]]]
+		}
+		{ d <= 5 } {
+			~m[~q[v, \x, g, v, v],
+				~osc[\amp, [0.4, 0.0, 0.3, 0.6, 1.0]],
+				~ramp[\crinkle, 0.0, 0.4, \exp]]
+		}
+		{ true } {
+			~m[~q[g, v, \x, g, v, g, v],
+				~osc[\amp, [0.3, 0.5, 0.0, 0.3, 0.6, 0.8, 1.0]],
+				~ramp[\clickVol, 0.2, 0.8, \lin]]
+		}
+	};
+
+	// gate: density → amp modulation depth
+	~pal[\gate] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { v }
+		{ d <= 2 } { ~m[~n[v, 2], ~osc[\amp, [1.0, 0.4]]] }
+		{ d <= 4 } { ~m[~n[v, d], ~osc[\amp, [1.0, 0.2, 0.6, 0.15]]] }
+		{ true }   { ~m[~n[~r[v, g], d],
+			~osc[\amp, [1.0, 0.1, 0.5, 0.1, 0.8, 0.1]],
+			~osc[\crinkle, [0.0, 0.3, 0.0, 0.5, 0.0, 0.7]]] }
+	};
+
+	// space: density → wetter, wider, further
+	~pal[\space] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { ~m[v, (roomSize: 0.05, amp: 0.9)] }
+		{ d <= 3 } { ~m[~n[v, d],
+			(roomSize: 0.3, amp: 0.7),
+			~drift[\mic1X, 0.5, 0.1, 3]] }
+		{ d <= 5 } { ~m[~n[~r[v, g, v], d],
+			~ramp[\roomSize, 0.1, 0.6, \exp],
+			~ramp[\amp, 0.8, 0.5, \lin],
+			~drift[\mic1X, 0.5, 0.1, 4],
+			~drift[\mic2Y, 0.5, 0.1, 4]] }
+		{ true }   { ~m[~n[~r[v, g], d],
+			(roomSize: 0.7, amp: 0.4),
+			~pick[#[mic1X, mic1Y, mic2X, mic2Y],
+				~geo.([0.5,0.5], \hex, 6, 0.2), 4]] }
+	};
+
+	// roll: accelerating buildup — ghost only in tail
+	~pal[\roll] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { v }
+		{ d <= 3 } { ~m[~n[v, d], ~ramp[\amp, 0.4, 1.0, \exp]] }
+		{ d <= 5 } { ~m[~q[v, v, g, v, v],
+			~ramp[\amp, 0.3, 1.0, \exp],
+			~ramp[\stretch, 1.2, 0.8, \lin]] }
+		{ true }   { ~m[~n[~r[v, v, g], d],
+			~ramp[\amp, 0.2, 1.0, \exp],
+			~ramp[\clickVol, 0.3, 0.9, \exp]] }
+	};
+
+	// sweep: density → rising amp sweep (replaces mkSweep factory)
+	~pal[\sweep] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { v }
+		{ d <= 3 } { ~m[~n[v, d], ~ramp[\amp, 0.2, 1.0, \lin]] }
+		{ true }   { ~m[~n[~r[v, g, v], d],
+			~ramp[\amp, 0.2, 1.0, \exp],
+			~osc[\amp, [1.0, 0.3, 0.7, 0.2, 0.8, 0.15, 1.0]]] }
+	};
+
+	// dark: density → crinkle + roomSize grows
+	~pal[\dark] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { ~m[v, (crinkle: 0.1, roomSize: 0.2)] }
+		{ d <= 3 } { ~m[~n[v, d], ~ramp[\crinkle, 0.0, 0.5, \exp], ~ramp[\roomSize, 0.1, 0.5, \lin]] }
+		{ true }   { ~m[~n[~r[v, g], d],
+			~ramp[\crinkle, 0.0, 0.8, \exp],
+			~ramp[\roomSize, 0.2, 0.8, \lin],
+			~osc[\amp, [0.8, 0.4, 0.6, 0.3]]] }
+	};
+
+	// stutter: burst of notes with random amp
+	~pal[\stutter] = { |d, v, g|
+		d = d ? 0; d = d.asInteger;
+		case
+		{ d == 0 } { \x }
+		{ d == 1 } { v }
+		{ d <= 3 } { ~m[~n[v, d],
+			~ramp[\amp, 0.2, 1.0, \rand],
+			~ramp[\stretch, 0.8, 1.2, \rand]] }
+		{ true }   { ~m[~n[~r[v, g, v, g], d],
+			~ramp[\amp, 0.1, 1.0, \rand],
+			~ramp[\pan, -0.5, 0.5, \rand]] }
+	};
+
+	// --- Core density functions ---
+
+	~cellDens = { |voice, ghost, densities, palette, mod|
+		var pal = palette ? ~pal[\basic];
+		var items = densities.collect { |d|
+			try {
+				if (d.isKindOf(Event)) {
+					var dVal = d[\dens] ?? 1;
+					// Extract DSL mods (ramps, mod functions) stored under f2mods key
+					var dslMods = d[\f2mods];
+					var modEv = d.copy;
+
+					var base = pal.(dVal, voice, ghost);
+					var allMods = [];
+					modEv.removeAt(\dens);
+					modEv.removeAt(\f2mods);
+					// Filter: only keep keys with valid values
+					modEv = modEv.select({ |v| v.notNil and: { v != "" } });
+
+					if (modEv.size > 0) { allMods = allMods.add(modEv) };
+					if (dslMods.notNil and: { dslMods.isKindOf(Array) }) {
+						dslMods.select(_.notNil).do { |dm|
+							if (dm.isKindOf(Function)) {
+								// Mod library: {|pat| ~m[pat, ...]} — call with base
+								base = try { dm.(base) } { |err|
+									"[f2 warn] step mod fn: % — skipped".format(err.errorString).postln;
+									base
+								};
+							} {
+								allMods = allMods.add(dm);
+							};
+						};
+					};
+					if (allMods.size > 0) {
+						(dsl_type: \bind, head: base, args: allMods)
+					} { base };
+				} {
+					pal.(d.asInteger, voice, ghost)
+				}
+			} { |err|
+				"[f2 warn] cellDens step %: % — rest".format(d, err.errorString).postln;
+				\x
+			};
+		};
+		var pat = (dsl_type: \seq, list: items);
+		if(mod.notNil) {
+			// mod can be:
+			// - Function: ~mod[\wobMic].(0.1, 4) returns { |pat| ~m[pat, ...] }
+			// - Event: (crinkle: 0.5) from synthLock
+			// - DSL node: (dsl_type: \ramp, ...) from ~ramp[...]
+			if (mod.isKindOf(Function)) {
+				try { mod.(pat) } { |err|
+					"[f2 warn] mod function: % — skipped".format(err.errorString).postln;
+					pat
+				}
+			} {
+				// Non-function: wrap as ~m[pat, mod]
+				(dsl_type: \bind, head: pat, args: [mod])
+			}
+		} { pat }
+	};
+
+	~layer = { |voice, ghost, dens, palette, mod|
+		(voice: voice, ghost: ghost, dens: dens,
+			palette: palette ? ~pal[\basic], mod: mod)
+	};
+
+	~stackLayers = { |layers, globalMod|
+		var validLayers = layers.collect { |l|
+			try {
+				~cellDens.(l[\voice], l[\ghost], l[\dens],
+					l[\palette], l[\mod])
+			} { |err|
+				"[f2 warn] layer %: % — skipped".format(l[\voice], err.errorString).postln;
+				nil
+			}
+		}.select(_.notNil);
+		if (validLayers.size == 0) {
+			"[f2 warn] all layers failed — rest".postln;
+			\x
+		} {
+			var pat = (dsl_type: \par, list: validLayers);
+			if(globalMod.notNil) {
+				if (globalMod.isKindOf(Function)) {
+					try { globalMod.(pat) } { |err|
+						"[f2 warn] globalMod: % — skipped".format(err.errorString).postln;
+						pat
+					}
+				} {
+					(dsl_type: \bind, head: pat, args: [globalMod])
+				}
+			} { pat }
+		}
+	};
+
+	// Convenience: pad layer with degree & drift
+	~padLayer = { |voice, deg, mod|
+		var pat = ~m[~n[voice, 2],
+			~osc[\degree, if(deg.isKindOf(Array)) { deg } { [deg] }],
+			~drift[\mic1X, 0.5, 0.1, 3],
+			~drift[\mic2Y, 0.5, 0.08, 5]];
+		if(mod.notNil) { mod.(pat) } { pat }
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// G4. BUILT-IN MODIFIERS
+	// ═══════════════════════════════════════════════════════════
+
+	~mod = ();
+
+	~mod[\wobMic] = { |amt=0.1, spd=4|
+		{ |pat| ~m[pat,
+			~drift[\mic1X, 0.5, amt, spd], ~drift[\mic1Y, 0.5, amt, spd],
+			~drift[\mic2X, 0.5, amt, spd], ~drift[\mic2Y, 0.5, amt, spd]] }
+	};
+
+	~mod[\spread] = { |shape=\hex, pts=6, r=0.25, scope=4|
+		{ |pat| ~m[pat,
+			~pick[#[mic1X, mic1Y, mic2X, mic2Y],
+				~geo.([0.5, 0.5], shape, pts, r), scope]] }
+	};
+
+	~mod[\swell] = { |from=0.2, to=1.0, curve=\exp|
+		{ |pat| ~m[pat, ~ramp[\amp, from, to, curve]] }
+	};
+
+	~mod[\fade] = { |from=1.0, to=0.05, curve=\exp|
+		{ |pat| ~m[pat, ~ramp[\amp, from, to, curve]] }
+	};
+
+	~mod[\morph] = { |fromX=0.2, toX=0.8|
+		{ |pat| ~m[pat,
+			~ramp[\mic1X, fromX, toX, \lin],
+			~ramp[\mic2X, toX, fromX, \lin]] }
+	};
+
+	~mod[\shimmer] = { |lo=0.5, hi=1.0|
+		{ |pat| ~m[pat,
+			~osc[\amp, [hi, lo, hi*0.8, lo*1.2]],
+			~osc[\clickVol, [0.6, 0.3, 0.5, 0.25]]] }
+	};
+
+	~mod[\darken] = {
+		{ |pat| ~m[pat,
+			~ramp[\crinkle, 0.0, 0.6, \exp],
+			~ramp[\roomSize, 0.1, 0.7, \lin]] }
+	};
+
+	~mod[\micSnap] = { |ax=0.1, ay=0.1, bx=0.9, by=0.9|
+		{ |pat| ~m[pat,
+			~osc[\mic1X, [ax, bx]], ~osc[\mic1Y, [ay, by]],
+			~osc[\mic2X, [bx, ax]], ~osc[\mic2Y, [by, ay]]] }
+	};
+
+	~mod[\diagCrawl] = { |spd=3|
+		{ |pat| ~m[pat,
+			~ramp[\srcX, 0.1, 0.9, \lin],
+			~ramp[\srcY, 0.9, 0.1, \lin],
+			~drift[\mic1X, 0.3, 0.15, spd],
+			~drift[\mic2Y, 0.7, 0.15, spd]] }
+	};
+
+	~mod[\spiralScatter] = { |r=0.3, pts=12|
+		{ |pat| ~m[pat,
+			~pick[#[mic1X, mic1Y, mic2X, mic2Y],
+				~geo.(nil, \spiral, pts, r), \event]] }
+	};
+
+	~mod[\ampGate] = { |vals|
+		{ |pat| ~m[pat, ~osc[\amp, vals]] }
+	};
+
+	~mod[\crinkGate] = { |vals|
+		{ |pat| ~m[pat, ~osc[\crinkle, vals]] }
+	};
+
+	~mod[\nudge] = { |amount=0.15|
+		{ |pat| ~m[pat,
+			~osc[\stretch, [1.0, 1.0 - amount, 1.0 + amount, 1.0]]] }
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// H. AUTO-CONTROL & GUI (unchanged)
+	// ═══════════════════════════════════════════════════════════
+
+	~makeControls = { |instrName|
+		var defaults = ~defs[instrName];
+		if (defaults.notNil) {
+			"> Creating controls for %... <".format(instrName).postln;
+			defaults.keysValuesChange { |key, val|
+				if (val.isNumber) {
+					var ndefName = (instrName ++ "_" ++ key).asSymbol;
+					if (Ndef(ndefName).source.isNil) {
+						Ndef(ndefName, val);
+						("[@] Created Ndef(\\" ++ ndefName ++ ") -> " ++ val).postln;
+					};
+					Ndef(ndefName)
+				} {
+					val
+				}
+			};
+		} { "[Err] Instrument def not found: %".format(instrName).warn };
+	};
+
+	~showGui = { |instrName|
+		var prefix = instrName.asString ++ "_";
+		var controlKeys = Ndef.all[s.name].keys.select({ |k|
+			k.asString.beginsWith(prefix)
+		}).asArray.sort;
+
+		if (controlKeys.size > 0) {
+			var rowHeight = 30;
+			var rowGap = 4;
+			var pad = 10;
+			var winWidth = 620;
+			var maxVisibleRows = 14;
+			var contentHeight = controlKeys.size * (rowHeight + rowGap) + (pad * 2);
+			var winHeight = contentHeight.min(maxVisibleRows * (rowHeight + rowGap) + (pad * 2));
+			var win, scroll, canvas;
+			var findSpec = { |name|
+				var s1, s2, camel;
+				s1 = name.asSymbol.asSpec;
+				if (s1.notNil) { s1 } {
+					// Try gr-prefixed: density → grDensity
+					camel = name.asString;
+					camel = ("gr" ++ camel[0].toUpper ++ camel[1..]).asSymbol;
+					s2 = camel.asSpec;
+					if (s2.notNil) { s2 } { ControlSpec(0, 1) };
+				};
+			};
+
+			win = Window("Controls: " ++ instrName,
+				Rect(100, 100, winWidth, winHeight)).front;
+			win.view.background_(Color.grey(0.15));
+
+			scroll = ScrollView(win, win.view.bounds)
+				.resize_(5)
+				.hasBorder_(false)
+				.background_(Color.grey(0.15));
+
+			canvas = CompositeView(scroll, Rect(0, 0, winWidth - 20, contentHeight));
+			canvas.addFlowLayout(pad@pad, rowGap@rowGap);
+
+			controlKeys.do { |key|
+				var paramName = key.asString.replace(prefix, "");
+				var ndef = Ndef(key);
+				var curVal = ndef.source ? 0;
+				var spec = findSpec.(paramName);
+				var sliderWidth = winWidth - 40;
+
+				EZSlider(canvas, sliderWidth @ rowHeight, paramName,
+					spec, { |sl| ndef.source_(sl.value) },
+					curVal, labelWidth: 110, numberWidth: 60);
+			};
+		} {
+			"[Err] No controls found for '%'.".format(instrName).warn;
+			"Did you run ~makeControls.(\\% )?".format(instrName).postln;
+		};
+	};
+
+	~showControls = { |instrName|
+		var pattern = "ProxyMixer(s, 8, options: [\name -> '" ++ instrName ++ "_'])";
+		pattern.interpret;
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// H2. GENERALIZED VISUALIZER
+	// ═══════════════════════════════════════════════════════════
+	//
+	// SendReply contract (all synths):
+	//   [srcX, srcY, mic1X, mic1Y, mic2X, mic2Y, colorID, synthType, env]
+	//   synthType: 0=modalS(legacy), 1=foldS, 2=pluckS
+	//   Legacy modalS sends 7 values → synthType defaults to 0
+	//
+	// Each synthType gets its own drawFunc branch.
+
+	~showVis = {
+		var win, view, oscFunc;
+		var voices = Dictionary.new;
+
+		var palette = [
+			[Color.new(1, 0.5, 0),   Color.new(1, 0.0, 0.8)],
+			[Color.cyan,             Color.blue],
+			[Color.yellow,           Color.green(0.8, 0.5)],
+			[Color.white,            Color.gray],
+			[Color.red,              Color.new(0.5, 0, 0)]
+		];
+
+		win = Window("F2 Visualizer", Rect(720, 400, 500, 500)).front;
+		win.view.background_(Color.black);
+
+		oscFunc = OSCdef(\f2_vis_main, { |msg|
+			var nodeID = msg[1];
+			var data = msg[3..];
+			voices[nodeID] = (data: data, time: Process.elapsedTime);
+			{ win.refresh }.defer;
+		}, '/f2_tel');
+
+		win.onClose = { oscFunc.free; };
+
+		view = UserView(win, win.view.bounds);
+		view.clearOnRefresh = false;
+
+		view.drawFunc = { |u|
+			var w = u.bounds.width;
+			var h = u.bounds.height;
+			var now = Process.elapsedTime;
+
+			Pen.fillColor = Color.black.alpha_(0.2);
+			Pen.fillRect(u.bounds);
+
+			Pen.strokeColor = Color.gray(0.2);
+			12.do { |i|
+				var pos = (i / 11) * w;
+				Pen.line(0@pos, w@pos);
+				Pen.line(pos@0, pos@h);
+			};
+			Pen.stroke;
+
+			voices.keysDo { |id|
+				var voice = voices[id];
+				var d = voice.data;
+				var lastTime = voice.time;
+
+				if ((now - lastTime) > 0.15) {
+					voices.removeAt(id);
+				} {
+					// ─── PARSE STANDARD TELEMETRY ───
+					var synthType = if(d.size > 0) { d[0].asInteger } { 0 };
+					var colID     = if(d.size > 1) { d[1].asInteger } { 0 };
+					var env       = if(d.size > 2) { d[2].clip(0, 1) } { 0.5 };
+					var ampVal    = if(d.size > 3) { d[3].clip(0, 1) } { 0.5 };
+					var pan       = if(d.size > 4) { d[4] } { 0 };
+					var posX      = if(d.size > 5) { d[5].clip(0, 1) } { 0.5 };
+					var posY      = if(d.size > 6) { d[6].clip(0, 1) } { 0.5 };
+					var p0        = if(d.size > 7) { d[7] } { 0 };
+					var p1        = if(d.size > 8) { d[8] } { 0 };
+					var p2        = if(d.size > 9) { d[9] } { 0 };
+					var p3        = if(d.size > 10) { d[10] } { 0 };
+
+					var colors = palette.wrapAt(colID);
+					var c1 = colors[0]; var c2 = colors[1];
+
+					var typeInfo = globalEnv.at(\synthTypes)[synthType];
+					var cls = if(typeInfo.notNil) { typeInfo.class } { \positioned };
+
+					case
+
+					// ─── POSITIONED CLASS (foldS, pluckS, modalS) ───
+					{ cls == \positioned } {
+						var sx = posX * w; var sy = posY * h;
+						// p0=micSpread, p1=crinkle/roughness, p2=roomSize, p3=modDepth
+						var micSpread = p0.clip(0, 1);
+						var crinkle = p1.clip(0, 1);
+						var room = p2.clip(0, 1);
+						var modD = p3.clip(0, 1);
+
+						case
+						// ─── TYPE 0: modalS — original dots + lines ───
+						{ synthType == 0 } {
+							var r = 3 + (env * 8);
+							Pen.fillColor = Color.green(0.9, 0.6 + (env * 0.4));
+							Pen.fillOval(Rect.aboutPoint(sx@sy, r, r));
+							// aura for roomSize
+							if (room > 0.1) {
+								var aR = r + (room * 15);
+								Pen.strokeColor = c1.alpha_(room * 0.3);
+								Pen.width = 0.5 + (room * 2);
+								Pen.strokeOval(Rect.aboutPoint(sx@sy, aR, aR));
+							};
+						}
+						// ─── TYPE 1: foldS — bend arc + pulsing ───
+						{ synthType == 1 } {
+							var srcR = 3 + (env * 8);
+							// arc from modDepth
+							var arcR = 8 + (modD * 20);
+							var arcAlpha = 0.2 + (env * 0.6);
+							// crinkle → jaggedness
+							var n = (crinkle * 8).ceil.asInteger.max(0);
+
+							Pen.width = 1 + (env * 2);
+							Pen.strokeColor = c1.blend(c2, 0.5).alpha_(arcAlpha);
+							Pen.strokeOval(Rect.aboutPoint(sx@sy, arcR, arcR * (1 - (crinkle * 0.3))));
+
+							// crinkle ticks
+							if (n > 0) {
+								n.do { |i|
+									var angle = (i / n) * 2pi;
+									var ix = sx + (cos(angle) * arcR * 0.8);
+									var iy = sy + (sin(angle) * arcR * 0.8 * (1 - (crinkle * 0.3)));
+									var ox = sx + (cos(angle) * (arcR + 3 + (crinkle * 4)));
+									var oy = sy + (sin(angle) * (arcR + 3 + (crinkle * 4)));
+									Pen.strokeColor = c2.alpha_(0.3 + (env * 0.4));
+									Pen.width = 0.5 + (crinkle * 1.5);
+									Pen.line(ix@iy, ox@oy); Pen.stroke;
+								};
+							};
+
+							// room → halo
+							if (room > 0.1) {
+								Pen.fillColor = c1.alpha_(room * 0.08);
+								Pen.fillOval(Rect.aboutPoint(sx@sy, arcR + (room * 15), arcR + (room * 15)));
+							};
+
+							// source dot
+							Pen.fillColor = c1.alpha_(0.5 + (env * 0.5));
+							Pen.fillOval(Rect.aboutPoint(sx@sy, srcR, srcR));
+						}
+						// ─── TYPE 2: pluckS — vibrating string ───
+						{ synthType == 2 } {
+							var vibAmt = env * 10;
+							var stringLen = 15 + (micSpread * 30);
+							var angle = modD * 2pi;
+							var x1 = sx - (cos(angle) * stringLen * 0.5);
+							var y1 = sy - (sin(angle) * stringLen * 0.5);
+							var x2 = sx + (cos(angle) * stringLen * 0.5);
+							var y2 = sy + (sin(angle) * stringLen * 0.5);
+							var dx = x2 - x1; var dy = y2 - y1;
+							var len = (dx.squared + dy.squared).sqrt.max(1);
+							var nx = dy.neg / len; var ny = dx / len;
+
+							Pen.width = 1 + (env * 1.5);
+							Pen.strokeColor = c1.blend(c2, 0.5).alpha_(0.4 + (env * 0.5));
+							Pen.moveTo(x1@y1);
+							12.do { |i|
+								var t = (i + 1) / 13;
+								var px = x1 + (dx * t);
+								var py = y1 + (dy * t);
+								var disp = sin(t * pi) * sin(t * 6 * pi) * vibAmt;
+								Pen.lineTo((px + (nx * disp))@(py + (ny * disp)));
+							};
+							Pen.lineTo(x2@y2);
+							Pen.stroke;
+
+							// bridge dots
+							Pen.fillColor = c1.alpha_(0.8);
+							Pen.rotate(0.785, x1, y1);
+							Pen.fillRect(Rect.aboutPoint(x1@y1, 3, 3));
+							Pen.rotate(-0.785, x1, y1);
+							Pen.fillColor = c2.alpha_(0.8);
+							Pen.rotate(0.785, x2, y2);
+							Pen.fillRect(Rect.aboutPoint(x2@y2, 3, 3));
+							Pen.rotate(-0.785, x2, y2);
+
+							// pluck point
+							Pen.fillColor = Color.green(0.9, 0.6 + (env * 0.4));
+							Pen.fillOval(Rect.aboutPoint(sx@sy, 3 + (env * 3), 3 + (env * 3)));
+						}
+						// ─── POSITIONED FALLBACK ───
+						{ true } {
+							var r = 4 + (env * 10);
+							Pen.fillColor = c1.alpha_(0.5 + (env * 0.5));
+							Pen.fillOval(Rect.aboutPoint(sx@sy, r, r));
+							if (room > 0.1) {
+								Pen.strokeColor = c2.alpha_(room * 0.3);
+								Pen.width = 0.5;
+								Pen.strokeOval(Rect.aboutPoint(sx@sy, r + (room * 12), r + (room * 12)));
+							};
+						};
+					}
+
+					// ─── SIMPLE CLASS (kickS, snareS, hatS) ───
+					{ cls == \simple } {
+						var cx = posX * w; var cy = (1 - posY) * h;
+						var sz = 3 + (env * ampVal * 20);
+						var timbre = p0.clip(0, 1);
+
+						case
+						// kick — impact burst
+						{ synthType == 3 or: { synthType == 9 } } {
+							var r = 4 + (env * 25);
+							var inner = 2 + (env * 8);
+							Pen.width = 1.5 + (env * 3);
+							Pen.strokeColor = c1.blend(c2, env).alpha_(env * 0.8);
+							Pen.strokeOval(Rect.aboutPoint(cx@cy, r, r));
+							Pen.fillColor = c1.alpha_(0.5 + (env * 0.5));
+							Pen.fillOval(Rect.aboutPoint(cx@cy, inner, inner));
+						}
+						// snare — scatter burst
+						{ synthType == 4 } {
+							var n = 6; var r = 3 + (env * 15);
+							n.do { |i|
+								var angle = (i / n) * 2pi + (env * 1.5);
+								var px = cx + (cos(angle) * r);
+								var py = cy + (sin(angle) * r);
+								var ssz = 1.5 + (env * 3 * (i.odd.asInteger));
+								var col = if(i.even) { c1 } { c2 };
+								Pen.fillColor = col.alpha_(0.4 + (env * 0.5));
+								Pen.fillOval(Rect.aboutPoint(px@py, ssz, ssz));
+							};
+							Pen.fillColor = Color.white.alpha_(env);
+							Pen.fillOval(Rect.aboutPoint(cx@cy, 2 + (env * 4), 2 + (env * 4)));
+						}
+						// hat — sparkle
+						{ synthType == 5 or: { synthType == 8 } } {
+							var ssz = 2 + (env * 6);
+							Pen.width = 0.8 + (env * 1.5);
+							Pen.strokeColor = c1.blend(c2, 0.5).alpha_(0.5 + (env * 0.5));
+							Pen.line((cx-ssz)@cy, (cx+ssz)@cy); Pen.stroke;
+							Pen.line(cx@(cy-ssz), cx@(cy+ssz)); Pen.stroke;
+							Pen.strokeColor = c2.alpha_(env * 0.6);
+							Pen.line((cx-ssz*0.7)@(cy-ssz*0.7), (cx+ssz*0.7)@(cy+ssz*0.7)); Pen.stroke;
+							Pen.line((cx+ssz*0.7)@(cy-ssz*0.7), (cx-ssz*0.7)@(cy+ssz*0.7)); Pen.stroke;
+							Pen.fillColor = Color.white.alpha_(env);
+							Pen.fillOval(Rect.aboutPoint(cx@cy, 1.5, 1.5));
+						}
+						// simple fallback — square
+						{ true } {
+							Pen.fillColor = c1.alpha_(0.4 + (env * 0.6));
+							Pen.fillRect(Rect.aboutPoint(cx@cy, sz, sz));
+							Pen.strokeColor = c2;
+							Pen.width = 1 + (timbre * 3);
+							Pen.strokeRect(Rect.aboutPoint(cx@cy, sz, sz));
+						};
+					}
+
+					// ─── TONAL CLASS (amS, clayPS) ───
+					{ cls == \tonal } {
+						var cx = posX * w; var cy = (1 - posY) * h;
+						var r = 5 + (env * ampVal * 12);
+						var brightness = p0.clip(0, 1);
+
+						// carrier ring
+						Pen.width = 1 + (env * 1.5);
+						Pen.strokeColor = c1.alpha_(0.4 + (env * 0.5));
+						Pen.strokeOval(Rect.aboutPoint(cx@cy, r, r));
+						// modulator ring
+						if (p1 > 0.1) {
+							var mr = r * 0.6;
+							Pen.strokeColor = c2.alpha_(0.3 + (env * 0.4));
+							Pen.strokeOval(Rect.aboutPoint(cx@cy, mr, mr));
+						};
+						// core dot (brightness → saturation)
+						Pen.fillColor = c1.blend(Color.white, brightness * 0.5).alpha_(0.5 + (env * 0.5));
+						Pen.fillOval(Rect.aboutPoint(cx@cy, 3 + (env * 3), 3 + (env * 3)));
+					}
+
+					// ─── UNKNOWN CLASS FALLBACK ───
+					{ true } {
+						var cx = posX * w; var cy = (1 - posY) * h;
+						var r = 4 + (env * 10);
+						Pen.fillColor = c1.alpha_(0.5 + (env * 0.5));
+						Pen.fillOval(Rect.aboutPoint(cx@cy, r, r));
+					};
+				};
+			};
+		};
+		view.animate = true;
+	};
+
+	// Legacy alias
+	~showModalVis = ~showVis;
+
+	~pat = { |func|
+		{ |argum|
+			var stream = if(argum.isArray) { Pseq(argum, inf).asStream } { Pfunc({ argum }).asStream };
+			{ func.value(stream) }
+		}
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// I. RACK BUILDER v2 — audio-rate bus routing
+	// ═══════════════════════════════════════════════════════════
+	//
+	// FIX: Old code used Ndef.map(\in, Ndef(prev)) which maps a
+	// kr control to an audio bus via /n_mapa. The control samples
+	// audio at control rate (~689 Hz @ blockSize 64), then K2A
+	// stretches each sample for 64 audio frames → bitcrush.
+	//
+	// New code uses .set(\in, bus.index) so effects receive the
+	// bus INDEX as a plain number, then read audio-rate data with
+	// In.ar(in, 2). No control-rate bottleneck, clean signal.
+	//
+	// Effects contract:
+	//   { |in ...args|  var sig = In.ar(in, 2); ... }
+	//   \in = bus index (integer). Always read with In.ar(in, 2).
+
+	// ~makeRack: auto-forks so it works from ANY context (eval, boot, REPL)
+	// Aliases: each effect gets both bare name AND band.name in fxTargets
+	//   e.g. fxTargets[\chamber] AND fxTargets[\high.chamber]
+	// If same effect on multiple bands, bare name → last one; use alias for specific.
+	~makeRack = { |config, onDone|
+		var env = currentEnvironment;
+		{
+			env.use {
+			var r = ~rack;
+			var d = ~dsl;
+			var cross = config[\cross] ?? [200, 2500];
+			var bandOutputs = Dictionary.new;
+			var masterNdef, masterBus;
+
+			r.dsl_ref = d;
+			d.fxTargets = Dictionary.new; // clear stale targets
+		d.fxAliasMap = Dictionary.new;
+
+			"> Rebuilding rack...".postln;
+			"[@] crossfreqs: %".format(cross).postln;
+
+			Ndef.clear;
+			if (r.fxGroup.notNil && r.fxGroup.isPlaying) { r.fxGroup.free };
+
+			// Ordered groups
+			r.fxGroup   = Group.tail(s.defaultGroup);
+			r.srcGroup  = Group.head(r.fxGroup);
+			r.bandGroup = Group.after(r.srcGroup);
+			r.chainGroup = Group.after(r.bandGroup);
+			r.masterGroup = Group.after(r.chainGroup);
+			r.outGroup  = Group.after(r.masterGroup);
+			s.sync;
+
+			// ─── OUTPUT shell ───
+			Ndef(\OUT).reshaping = \none;
+			Ndef(\OUT).ar(2);
+			Ndef(\OUT).group = r.outGroup;
+			Ndef(\OUT)[0] = { DC.ar(0 ! 2) };
+			Ndef(\OUT).play(0, 2);
+
+			// ─── SOURCE ───
+			Ndef(\src).reshaping = \none;
+			Ndef(\src).ar(2);
+			Ndef(\src).group = r.srcGroup;
+			Ndef(\src)[0] = { In.ar(r.bus.main.index, 2) };
+			"[@] src (bus %) -> Ndef(\\src)".format(r.bus.main.index).postln;
+
+			// ─── CROSSOVER BANDS ───
+			[\band_L, \band_M, \band_H].do { |key|
+				Ndef(key).reshaping = \none;
+				Ndef(key).ar(2);
+				Ndef(key).group = r.bandGroup;
+			};
+
+			Ndef(\band_L)[0] = { LPF.ar(LPF.ar(Ndef(\src).ar, cross[0]), cross[0]) };
+			"[@] Ndef(\\src) -> [lpf %Hz] -> Ndef(\\band_L)".format(cross[0]).postln;
+
+			Ndef(\band_M)[0] = {
+				var lowCut = HPF.ar(HPF.ar(Ndef(\src).ar, cross[0]), cross[0]);
+				LPF.ar(LPF.ar(lowCut, cross[1]), cross[1]);
+			};
+			"[@] Ndef(\\src) -> [bpf %-%Hz] -> Ndef(\\band_M)".format(cross[0], cross[1]).postln;
+
+			Ndef(\band_H)[0] = { HPF.ar(HPF.ar(Ndef(\src).ar, cross[1]), cross[1]) };
+			"[@] Ndef(\\src) -> [hpf %Hz] -> Ndef(\\band_H)".format(cross[1]).postln;
+
+			// ─── PER-BAND CHAINS ───
+			[\low, \mid, \high].do { |band|
+				var list = config[band];
+				var sourceKey = ("band_" ++ band.asString.first.toUpper).asSymbol;
+				var currentBus = Ndef(sourceKey).bus.index;
+
+				if (list.notNil and: { list.size > 0 }) {
+					"[@] processing band: %...".format(band).postln;
+
+					list.do { |modName, i|
+						var ndefKey = (i.asString ++ "_" ++ band ++ "_" ++ modName).asSymbol;
+						var alias  = (band.asString ++ "." ++ modName.asString).asSymbol;
+						var func = r.repo[modName];
+
+						if (func.notNil) {
+							Ndef(ndefKey).reshaping = \none;
+							Ndef(ndefKey).ar(2);
+							Ndef(ndefKey).group = r.chainGroup;
+							Ndef(ndefKey)[0] = func;
+							Ndef(ndefKey).set(\in, currentBus);
+							Ndef(ndefKey).set(\tel_bus, r.bus.tel.index);
+							"[@]   bus % -> [%] -> % (bus %) alias: %".format(
+								currentBus, modName, ndefKey, Ndef(ndefKey).bus.index, alias).postln;
+							d.fxTargets[modName] = ndefKey;  // bare (last wins)
+							d.fxTargets[alias]   = ndefKey;  // band-specific
+							d.fxAliasMap[modName] = modName;
+							d.fxAliasMap[alias]   = modName;
+							currentBus = Ndef(ndefKey).bus.index;
+						} {
+							"[@]   [error] effect '%' not found in repo".format(modName).warn;
+						};
+					};
+				};
+				bandOutputs[band] = currentBus;
+			};
+
+			// ─── MASTER: sum three bands ───
+			Ndef(\master).reshaping = \none;
+			Ndef(\master).ar(2);
+			Ndef(\master).group = r.masterGroup;
+			Ndef(\master)[0] = {
+				In.ar(bandOutputs[\low], 2) +
+				In.ar(bandOutputs[\mid], 2) +
+				In.ar(bandOutputs[\high], 2)
+			};
+			masterBus = Ndef(\master).bus.index;
+
+			"[@] sum(bus %, %, %) -> Ndef(\\master) (bus %)".format(
+				bandOutputs[\low], bandOutputs[\mid], bandOutputs[\high], masterBus).postln;
+
+			// ─── MASTER CHAIN ───
+			if (config[\master].notNil and: { config[\master].size > 0 }) {
+				"[@] processing master chain...".postln;
+				config[\master].asArray.do { |modName, i|
+					var ndefKey = (i.asString ++ "_master_" ++ modName).asSymbol;
+					var alias   = ("master." ++ modName.asString).asSymbol;
+					var func = r.repo[modName];
+
+					if (func.notNil) {
+						Ndef(ndefKey).reshaping = \none;
+						Ndef(ndefKey).ar(2);
+						Ndef(ndefKey).group = r.masterGroup;
+						Ndef(ndefKey)[0] = func;
+						Ndef(ndefKey).set(\in, masterBus);
+						Ndef(ndefKey).set(\tel_bus, r.bus.tel.index);
+						"[@]   bus % -> [%] -> % (bus %) alias: %".format(
+							masterBus, modName, ndefKey, Ndef(ndefKey).bus.index, alias).postln;
+						d.fxTargets[modName] = ndefKey;
+						d.fxTargets[alias]   = ndefKey;
+						d.fxAliasMap[modName] = modName;
+						d.fxAliasMap[alias]   = modName;
+						masterBus = Ndef(ndefKey).bus.index;
+					}
+				};
+			};
+
+			// ─── FINAL OUTPUT ───
+			Ndef(\OUT).fadeTime = 0.1;
+			Ndef(\OUT)[0] = {
+				var sig = In.ar(masterBus, 2);
+				sig = LeakDC.ar(sig);
+				sig = Sanitize.ar(sig);
+				Limiter.ar(sig, 0.95);
+			};
+
+			"[@] bus % -> [limit/sanitize] -> Ndef(\\OUT)".format(masterBus).postln;
+			"> Rack is ready.".postln;
+
+			// §fx-base: Ndef.clear above wiped every engine fx mapping — re-map all
+			// registered (fx, param) pairs onto their mb buses against the FRESH
+			// fxTargets, and refresh their bases from the rebuilt effects.
+			if (~f2FxReapply.notNil) { ~f2FxReapply.value };
+
+			// callback if provided
+			if (onDone.notNil) { onDone.value };
+			}; // env.use
+		}.fork;
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// J. LOADERS (unchanged)
+	// ═══════════════════════════════════════════════════════════
+
+	~loadFolder = { |subDir, type|
+		var p = rootPath +/+ subDir;
+		"> Loading % from: %".format(subDir, p).postln;
+		// §fx-guard молчаливый скип каталога прятал пустой fx-репо (глухие шины) — кричим
+		if (File.exists(p).not) { "✗ ~loadFolder: % NOT FOUND — skipped (bad root?)".format(p).postln };
+		if (File.exists(p)) {
+			PathName(p).entries.do { |f|
+				if (f.extension == "scd") {
+					try {
+						if (type == \fx) {
+							var func = f.fullPath.load;
+							if (func.isKindOf(Function)) {
+								if (func.def.argNames.includes(\in)) {
+									~rack.repo[f.fileNameWithoutExtension.asSymbol] = func;
+									("[Fx]  " ++ f.fileNameWithoutExtension ++ ".").postln;
+								} { ("[Err] " ++ f.fileName ++ " ignored.").postln; };
+							}
+						} { f.fullPath.load; ("[Def] " ++ f.fileNameWithoutExtension ++ ".").postln; }
+					} { |e| ("[Err] " ++ f.fileName ++ ".").postln; };
+				}
+			}
+		}
+	};
+
+	~loadModalSamples = {
+		var p = rootPath +/+ "ModalSamples";
+		"> Loading ModalSamples from: %".format(p).postln;
+		if (File.exists(p)) {
+			PathName(p).entries.do { |f|
+				if (f.extension == "json") {
+					try {
+						var rawData = File.readAllString(f.fullPath).interpret;
+						var gridSize = 12; var numModes = 32; var numPoints = gridSize * gridSize;
+						var freqs = FloatArray.newClear(numPoints * numModes);
+						var amps = FloatArray.newClear(numPoints * numModes);
+						var decays = FloatArray.newClear(numPoints * numModes);
+						rawData.do({ |val, i|
+							var pointIdx = (i / 3 / numModes).floor; var modeIdx = ((i / 3) % numModes).floor; var type = i % 3; var tIdx = (pointIdx * numModes) + modeIdx;
+							case {type==0}{freqs[tIdx]=val} {type==1}{amps[tIdx]=val} {type==2}{decays[tIdx]=val};
+						});
+						~modalBuffers[f.fileNameWithoutExtension.asSymbol] = (
+							f: Buffer.loadCollection(s, freqs, numModes), a: Buffer.loadCollection(s, amps, numModes), d: Buffer.loadCollection(s, decays, numModes)
+						);
+						("[ModS] " ++ f.fileNameWithoutExtension ++ ".").postln;
+					} { |e| ("[Err] Failed to load modal sample " ++ f.fileName ++ ": " ++ e).postln; };
+				}
+			}
+		};
+		s.sync;
+	};
+
+	// §smp SAMPLER.md §6: a samplerU card names its own file in the RESOURCE opt
+	// `sample` (decision 4 — two Sampler cards in one strip must be able to hold
+	// different files, which a preset-wide buf cannot express). The opt changes
+	// no graph, so it never reaches the variant name: \f2voice resolves it here
+	// at spawn. An empty or unknown name falls back to the preset-level buffer
+	// (Preset.sample → ev[\buf]). The four analysis buffers of §6 (sliceBuf /
+	// onsetBuf / pitchBuf / fftBuf) are resolved beside it, in the chain loop
+	// below, through ~f2SmpRes — each -1 until its own pass has landed.
+	~f2SmpBuf = { |opts|
+		var nm = opts !? { |o| o[\sample] };
+		var d = topEnvironment[\samples];
+		var b;
+		if (nm.notNil and: { nm.asString.isEmpty.not } and: { d.notNil }) {
+			b = d[nm.asSymbol];
+			if (b.isNil and: { topEnvironment[\f2UnitWarnOnce].notNil }) {
+				topEnvironment[\f2UnitWarnOnce].(("smp_nosample_" ++ nm).asSymbol,
+					"⚠ [f2 smp] sample % is not loaded — the card falls back to the preset sample".format(nm));
+			};
+		};
+		b
+	};
+
+	~loadSamples = {
+	var p = rootPath +/+ "Samples";
+	"> Loading Samples from: %".format(p).postln;
+	~samples = ~samples ?? IdentityDictionary.new;
+	if (File.exists(p)) {
+		PathName(p).deepFiles.do { |f|
+			if (#["wav","aif","aiff","flac","ogg"].includesEqual(f.extension.toLower)) {
+				try {
+					var rel = f.fullPath.replace(p ++ "/", "");
+					var key = rel.splitext.first.replace("/", "_").asSymbol;
+					~samples[key] = Buffer.readChannel(s, f.fullPath, channels: [0]);
+					("[Smp] " ++ key ++ ".").postln;
+				} { |e| ("[Err] Failed to load sample " ++ f.fileName ++ ": " ++ e).postln; };
+			}
+		}
+	};
+	// §smp the analysis artefacts of §6 belong to the sample buffers that were
+	// just replaced: their slice tables are dropped so the next spawn re-resolves
+	// (and re-analyses) against the new files.
+	topEnvironment[\f2SmpForget] !? { |f| f.() };
+	// §conv-ir and the prepared IR spectra, for the same reason: they were read
+	// from the files these buffers just replaced.
+	topEnvironment[\f2ConvIrForget] !? { |f| f.() };
+	// §curve the rendered drawings: their bufnums were handed out by an allocator
+	// whose buffers have just been replaced under them, so they are dropped and
+	// the next spawn re-renders (the twin of the two above, called beside them).
+	topEnvironment[\f2CurveForget] !? { |f| f.() };
+	s.sync;
+};
+
+	~loadFolder.("Synths", \def);
+	~loadFolder.("Effects", \fx);
+	if(globalEnv.at(\loadSamples).notNil) { ~loadSamples.() };
+	~loadModalSamples.();
+	~loadSamples.();
+
+	~exportContext = {
+		var ctx, toJSON, sysKeys, knownSpecs;
+
+		toJSON = { |obj|
+			if (obj.isNil) { "null" } {
+				// §smp an opt schema carries `res: true` (SAMPLER.md §3) — a Boolean
+				// must land in the JSON as one, not as its class name
+				if (obj.isKindOf(Boolean)) { obj.asString } {
+				if (obj.isNumber) { obj.asString } {
+					if (obj.isKindOf(Symbol)) {
+						"\"" ++ obj.asString ++ "\""
+					} {
+						if (obj.isKindOf(String)) {
+							// Escape backslashes first, then quotes
+							var s = obj.asString;
+							s = s.replace("\\", "\\\\");
+							s = s.replace("\"", "\\\"");
+							"\"" ++ s ++ "\""
+						} {
+							if (obj.isKindOf(Array)) {
+								"[" ++ obj.collect({ |item| toJSON.(item) }).join(", ") ++ "]"
+							} {
+								if (obj.isKindOf(Dictionary) or: { obj.isKindOf(Event) }) {
+									"{" ++ obj.keys.asArray.sort.collect({ |k|
+										"\"" ++ k.asString ++ "\": " ++ toJSON.(obj[k])
+									}).join(", ") ++ "}"
+								} {
+									"\"" ++ obj.class.name ++ "\""
+								}
+							}
+						}
+					}
+				}
+				}
+			}
+		};
+
+		sysKeys = IdentitySet.new;
+		[\instrument, \selfFree, \scale, \type, \args,
+			\group, \addAction, \out, \tel_bus, \in, \finish, \callback,
+			\sustain, \sendGate, \isRest, \delta, \dur, \legato,
+			\dsl_type, \list, \voice, \ghost, \dens, \palette, \mod,
+			\doneAction, \gate, \id, \server, \msgFunc, \hasGate,
+			\parent, \proto, \know].do { |k| sysKeys.add(k) };
+
+		ctx = (
+			defs: ~defs.keys.asArray.sort,
+			palettes: ~pal.keys.asArray.select({ |k| k.isKindOf(Symbol) }).sort,
+			fxTargets: ~dsl.fxTargets.keys.asArray.sort,
+			fxTargetMap: {
+				var m = Dictionary.new;
+				~dsl.fxTargets.keysValuesDo { |k, v| m[k] = v.asString };
+				m
+			}.value,
+			fxAliasMap: {
+				var m = Dictionary.new;
+				if (~dsl.fxAliasMap.notNil) {
+					~dsl.fxAliasMap.keysValuesDo { |k, v| m[k] = v.asString };
+				};
+				m
+			}.value,
+			mods: (),
+			fxArgs: (),
+			specs: (),
+			synthParams: ()
+		);
+
+		// 1. Mods
+		ctx[\modArgOrder] = ();
+		~mod.keysValuesDo { |modName, modFunc|
+			try {
+				var argNames = modFunc.def.argNames;
+				var defaults = modFunc.def.prototypeFrame;
+				var modInfo = ();
+				if (argNames.notNil) {
+					argNames.do { |argName, i|
+						var val = defaults[i];
+						if (val.isKindOf(Symbol)) {
+							// Store as string with \ prefix — toJSON escapes → GUI gets \hex
+							modInfo[argName] = "\\" ++ val.asString
+						} {
+							if (val.isKindOf(Array)) {
+								modInfo[argName] = "[" ++ val.collect(_.asString).join(",") ++ "]"
+							} {
+								modInfo[argName] = if (val.isNil) { 0 } { val }
+							}
+						}
+					}
+				};
+				ctx[\mods][modName] = modInfo;
+				if (argNames.notNil) {
+					ctx[\modArgOrder][modName] = argNames;
+				};
+			} { |err|
+				"[ctx warn] mod %: %".format(modName, err.errorString).postln
+			};
+		};
+
+
+		// 5. SynthDef descriptors from SynthDescLib (args + defaults)
+		ctx[\synthDescs] = ();
+		SynthDescLib.global.synthDescs.keysValuesDo { |name, desc|
+			// §cards SynthDef VARIANTS (`unit__k_v…`, built by ~f2UnitDef) are not
+			// instruments — skipped; the base def carries the unit's knobs.
+			if (name.asString.contains("__").not) {
+				try {
+					var params = ();
+					desc.controls.do { |ctrl|
+						if (sysKeys.includes(ctrl.name).not) {
+							params[ctrl.name] = ctrl.defaultValue ?? 0;
+						}
+					};
+					if (params.size > 0) { ctx[\synthDescs][name] = params };
+				} { }
+			};
+		};
+		// 5b. §poly unit schema (f2units ~f2UnitOpts / ~f2UnitSpecs, POLYSYNTH.md
+		// §3): per unit the structural menus (values / def / label — an opt
+		// selects the SynthDef variant) and the knob ranges (min / max / warp /
+		// unit / label / sel). Plain dictionaries: toJSON above renders Events
+		// and IdentityDictionaries as objects, #[…] literals as arrays and
+		// symbols as strings. Empty objects until f2units has loaded.
+		ctx[\unitOpts] = topEnvironment[\f2UnitOpts] ? ();
+		ctx[\unitSpecs] = topEnvironment[\f2UnitSpecs] ? ();
+		// 5c. §cut юниты, ВЫРЕЗАННЫЕ из движка (~f2UnitsCut, units v49: amU / envcaU /
+		// onsetU) → на что пересобирать карточку. Это НЕ legacy: legacy-юнит остаётся в
+		// библиотеке, доезжает до SynthDesc и просто спрятан из меню; вырезанного нет
+		// нигде, поэтому карточка старого сейва не находит ни одного контрола и рисуется
+		// ПУСТОЙ — выглядит как байпас, а звучать не будет никогда. Движок печатает
+		// ~f2UnitGoneMsg в пост-окно, но музыкант смотрит не туда: с этой строкой ту же
+		// фразу говорит сама карточка.
+		ctx[\unitsCut] = topEnvironment[\f2UnitsCut] ? ();
+
+		// 6. Defs detail — alias → { instrument, numeric + symbol params }
+		ctx[\defsDetail] = ();
+		~defs.keysValuesDo { |k, v|
+			var detail = ();
+			detail[\instrument] = v[\instrument].asString;
+			v.keysValuesDo { |pk, pv|
+				if (sysKeys.includes(pk).not) {
+					if (pv.isNumber) { detail[pk] = pv }
+					{ if (pv.isKindOf(Buffer)) { detail[pk] = pv.bufnum }
+					{ if (pv.isKindOf(Symbol)) { detail[pk] = pv.asString } } }
+				}
+			};
+			ctx[\defsDetail][k] = detail;
+		};
+
+		// 6b. Sample names — from ~samples dictionary
+		ctx[\sampleNames] = ~samples.keys.asArray.sort.collect(_.asString);
+
+		// Sample name → bufnum mapping for UI
+		ctx[\sampleBufs] = ();
+		~samples.keysValuesDo { |k, v|
+			if (v.isKindOf(Buffer)) { ctx[\sampleBufs][k.asString] = v.bufnum };
+		};
+
+		// 6d. §smp the slicing analysis of the samples the offline pass has finished
+		// (SAMPLER.md §6). It rides in the CONTEXT, per sample, exactly as sampleBufs
+		// does: it describes a FILE, not a voice — it changes only when a sample or an
+		// analysis opt changes, never per note — so a live telemetry channel would
+		// carry the same numbers over and over for nothing. The payload itself is
+		// built by ~f2SmpAnalysisCtx (f2units, beside the pass that produces it);
+		// f2units not loaded ⇒ an empty object, exactly as before this stage.
+		ctx[\sampleAnalysis] = (topEnvironment[\f2SmpAnalysisCtx] !? { |f|
+			try { f.value(~samples) } { |e|
+				"[ctx warn] sampleAnalysis: %".format(e.errorString).postln; nil
+			}
+		}) ? ();
+
+		// 6c. Modal buffer names
+		if (~modalBuffers.notNil) {
+			ctx[\modalNames] = ~modalBuffers.keys.asArray.sort.collect(_.asString);
+		};
+
+		// 2. FX args
+		if (~rack.notNil and: { ~rack.repo.notNil }) {
+			~rack.repo.keysValuesDo { |fxName, fxFunc|
+				try {
+					var argNames = fxFunc.def.argNames;
+					var defaults = fxFunc.def.prototypeFrame;
+					var fxInfo = ();
+					if (argNames.notNil) {
+						argNames.do { |argName, i|
+							if (sysKeys.includes(argName).not) {
+								var val = defaults[i];
+								if (val.notNil and: { val.isNumber }) { fxInfo[argName] = val }
+							}
+						}
+					};
+					if (fxInfo.size > 0) { ctx[\fxArgs][fxName] = fxInfo };
+				} { |err|
+					"[ctx warn] fx %: %".format(fxName, err.errorString).postln
+				};
+			};
+		};
+
+		// 3. Specs — hardcoded known ranges (safe, no Spec.specs iteration)
+		knownSpecs = ();
+		knownSpecs[\amp] = (min:0, max:1, warp:"lin");
+		knownSpecs[\pan] = (min: -1, max:1, warp:"lin");
+		knownSpecs[\drive] = (min:1, max:100, warp:"exp");
+		knownSpecs[\mix] = (min:0, max:1, warp:"lin");
+		knownSpecs[\crinkle] = (min:0, max:1, warp:"lin");
+		knownSpecs[\roomSize] = (min:0, max:1, warp:"lin");
+		knownSpecs[\clickVol] = (min:0, max:1, warp:"lin");
+		knownSpecs[\roughness] = (min:0, max:1, warp:"lin");
+		knownSpecs[\decayScale] = (min:0.1, max:10, warp:"exp");
+		knownSpecs[\srcX] = (min:0, max:1, warp:"lin");
+		knownSpecs[\srcY] = (min:0, max:1, warp:"lin");
+		knownSpecs[\mic1X] = (min:0, max:1, warp:"lin");
+		knownSpecs[\mic1Y] = (min:0, max:1, warp:"lin");
+		knownSpecs[\mic2X] = (min:0, max:1, warp:"lin");
+		knownSpecs[\mic2Y] = (min:0, max:1, warp:"lin");
+		knownSpecs[\freq] = (min:20, max:20000, warp:"exp");
+		knownSpecs[\rate] = (min:0.1, max:10, warp:"exp");
+		knownSpecs[\stretch] = (min:0.1, max:4, warp:"exp");
+		knownSpecs[\atk] = (min:0.001, max:4, warp:"exp");
+		knownSpecs[\dec] = (min:0.01, max:4, warp:"exp");
+		knownSpecs[\sus] = (min:0, max:1, warp:"lin");
+		knownSpecs[\rel] = (min:0.01, max:8, warp:"exp");
+		knownSpecs[\rattle] = (min:0, max:1, warp:"lin");
+		knownSpecs[\stiffness] = (min:0, max:1, warp:"lin");
+		knownSpecs[\posX] = (min:0, max:1, warp:"lin");
+		knownSpecs[\posZ] = (min:0, max:1, warp:"lin");
+		knownSpecs[\reflect] = (min:0, max:1, warp:"lin");
+		knownSpecs[\brightness] = (min:0, max:1, warp:"lin");
+		knownSpecs[\tail] = (min:0, max:1, warp:"lin");
+		knownSpecs[\density] = (min:0, max:1, warp:"lin");
+		knownSpecs[\shimmer] = (min:0, max:1, warp:"lin");
+		knownSpecs[\feedback] = (min:0, max:1, warp:"lin");
+		knownSpecs[\time] = (min:0.01, max:4, warp:"exp");
+		knownSpecs[\damp] = (min:0, max:1, warp:"lin");
+		knownSpecs[\depth] = (min:0, max:1, warp:"lin");
+		// §loop-cond кондиционер порт-входов юнитов (f2units): газ/демпфер/насыщение петли
+		knownSpecs[\inGain] = (min:0, max:2, warp:"lin");
+		knownSpecs[\inDamp] = (min:0, max:1, warp:"lin");
+		knownSpecs[\inSat] = (min:0, max:1, warp:"lin");
+		// §glitch-units modalU/pluckU/noiseU/combU/foldU
+		knownSpecs[\inharm] = (min:0, max:1, warp:"lin");
+		knownSpecs[\bright] = (min:0, max:1, warp:"lin");
+		knownSpecs[\decMul] = (min:0.02, max:4, warp:"exp");
+		knownSpecs[\click] = (min:0, max:2, warp:"lin");
+		knownSpecs[\noiseAmt] = (min:0, max:1, warp:"lin");
+		knownSpecs[\fb] = (min:0, max:1, warp:"lin");
+		knownSpecs[\plDamp] = (min:0, max:1, warp:"lin");
+		knownSpecs[\burst] = (min:0, max:2, warp:"lin");
+		knownSpecs[\burstFreq] = (min:200, max:12000, warp:"exp");
+		knownSpecs[\res] = (min:0, max:1, warp:"lin");
+		knownSpecs[\pEnv] = (min:0, max:1, warp:"lin");
+		knownSpecs[\pDec] = (min:0.005, max:0.5, warp:"exp");
+		knownSpecs[\crackle] = (min:0, max:1, warp:"lin");
+		knownSpecs[\combFreq] = (min:18, max:2000, warp:"exp");
+		knownSpecs[\fDrive] = (min:0, max:1, warp:"lin");
+		knownSpecs[\foldAmt] = (min:0, max:1, warp:"lin");
+		knownSpecs[\crush] = (min:0, max:1, warp:"lin");
+		// §mod-suite shiftU/shimU/vocU
+		knownSpecs[\shift] = (min: -1000, max:1000, warp:"lin");
+		knownSpecs[\pRatio] = (min:0.25, max:4, warp:"exp");
+		knownSpecs[\pDisp] = (min:0, max:0.5, warp:"lin");
+		knownSpecs[\sens] = (min:0, max:2, warp:"lin");
+		knownSpecs[\hard] = (min:0, max:1, warp:"lin");
+		knownSpecs[\vAtk] = (min:0.001, max:0.1, warp:"exp");
+		knownSpecs[\vRel] = (min:0.01, max:1, warp:"exp");
+		// §pad-drum subU/padU
+		knownSpecs[\dtn] = (min:0, max:1, warp:"lin");
+		knownSpecs[\wide] = (min:0, max:1, warp:"lin");
+		knownSpecs[\subAmt] = (min:0, max:1, warp:"lin");
+		knownSpecs[\move] = (min:0, max:1, warp:"lin");
+		// §spec-suite harmU/specU/tranU
+		knownSpecs[\nHarm] = (min:1, max:12, warp:"lin");
+		knownSpecs[\slope] = (min:0, max:1, warp:"lin");
+		knownSpecs[\odd] = (min:0, max:1, warp:"lin");
+		knownSpecs[\shimmer] = (min:0, max:1, warp:"lin");
+		knownSpecs[\smear] = (min:0, max:1, warp:"lin");
+		knownSpecs[\bShift] = (min: -64, max:64, warp:"lin");
+		knownSpecs[\freeze] = (min:0, max:1, warp:"lin");
+		knownSpecs[\scomb] = (min:0, max:1, warp:"lin");
+		knownSpecs[\trans] = (min:0, max:2, warp:"lin");
+		knownSpecs[\body] = (min:0, max:2, warp:"lin");
+		knownSpecs[\snap] = (min:0, max:1, warp:"lin");
+		// §conv-suite convU/xspecU/scatU (onsetU was cut in units v49; bias/boost
+		// went with amU — nothing left in the engine declares them)
+		knownSpecs[\kSpan] = (min:0.1, max:1, warp:"lin");
+		knownSpecs[\kGain] = (min:0.1, max:8, warp:"exp");
+		knownSpecs[\preDly] = (min:0, max:0.2, warp:"lin");
+		knownSpecs[\xmode] = (min:0, max:2, warp:"lin");
+		knownSpecs[\nGrain] = (min:1, max:16, warp:"lin");
+		knownSpecs[\scat] = (min:0.01, max:0.5, warp:"exp");
+		knownSpecs[\gDur] = (min:0.01, max:0.5, warp:"exp");
+		// §stut-look сдвиг окна захвата stutU назад в прошлое (сек)
+		knownSpecs[\look] = (min:0, max:1.3, warp:"lin");
+		// §tape grainU: 0 = grains, 1 = grPos-as-read-head
+		knownSpecs[\mode] = (min:0, max:1, warp:"lin");
+		// §flat-grain grainU: 0 = hann grains, 1 = flat COLA window (uniform
+		// loudness at duty 1 — grSize = 1/grRate — the grain-slicer setting)
+		knownSpecs[\grEnv] = (min:0, max:1, warp:"lin");
+		// §chip chipU: tracker 8-bit oscillator (Jxy frame-rate arpeggio)
+		knownSpecs[\wave] = (min:0, max:3, warp:"lin");
+		knownSpecs[\duty] = (min:0.05, max:0.95, warp:"lin");
+		knownSpecs[\arp1] = (min: -24, max:24, warp:"lin");
+		knownSpecs[\arp2] = (min: -24, max:24, warp:"lin");
+		knownSpecs[\arp3] = (min: -24, max:24, warp:"lin");
+		knownSpecs[\arpN] = (min:0, max:3, warp:"lin");
+		knownSpecs[\arpRate] = (min:1, max:200, warp:"exp");
+		knownSpecs[\bits] = (min:1, max:16, warp:"lin");
+		knownSpecs[\srate] = (min:0, max:22050, warp:"lin");
+		knownSpecs[\cut] = (min:80, max:18000, warp:"exp");
+		knownSpecs[\rq] = (min:0.05, max:1, warp:"lin");
+		knownSpecs[\vib] = (min:0, max:1, warp:"lin");
+		knownSpecs[\vibRate] = (min:0.5, max:16, warp:"exp");
+		// §unit-eq трёхполосный эквалайзер на выходе не-осцилляторных юнитов
+		knownSpecs[\eqLo] = (min:0, max:4, warp:"lin");
+		knownSpecs[\eqMid] = (min:0, max:4, warp:"lin");
+		knownSpecs[\eqHi] = (min:0, max:4, warp:"lin");
+		knownSpecs[\eqLoF] = (min:30, max:2000, warp:"exp");
+		knownSpecs[\eqHiF] = (min:500, max:16000, warp:"exp");
+		knownSpecs[\modFreq] = (min:0.1, max:20, warp:"exp");
+		knownSpecs[\threshold] = (min:0, max:1, warp:"lin");
+		knownSpecs[\attack] = (min:0.001, max:0.5, warp:"exp");
+		knownSpecs[\release] = (min:0.01, max:2, warp:"exp");
+		knownSpecs[\amount] = (min:0, max:1, warp:"lin");
+		knownSpecs[\colorID] = (min:0, max:10, warp:"lin");
+		ctx[\specs] = knownSpecs;
+
+		// 4. Synth params
+		~defs.keysValuesDo { |k, v|
+			v.keys.do { |paramKey|
+				if (sysKeys.includes(paramKey).not) {
+					ctx[\synthParams][paramKey] = true
+				}
+			}
+		};
+		ctx[\synthParams] = ctx[\synthParams].keys.asArray.sort;
+
+
+		// Extended context exports
+		ctx[\synthTypes] = ();
+		~synthTypes.keysValuesDo { |id, info|
+			ctx[\synthTypes][id] = (
+				name: info[\name].asString,
+				class: info[\class].asString,
+				params: info[\params].collect(_.asString)
+			);
+		};
+		ctx[\paramsBySynth] = ();
+		~defs.keysValuesDo { |defName, defVal|
+			var instr = defVal[\instrument].asString;
+			if (ctx[\paramsBySynth][instr].isNil) {
+				ctx[\paramsBySynth][instr] = (defs: [], params: ());
+			};
+			ctx[\paramsBySynth][instr][\defs] = ctx[\paramsBySynth][instr][\defs].add(defName.asString);
+			defVal.keysValuesDo { |k, v|
+				if (sysKeys.includes(k).not and: { v.isNumber }) {
+					ctx[\paramsBySynth][instr][\params][k] = v;
+				};
+			};
+		};
+		ctx[\busNames] = ~rack.bus.keys.asArray.sort.collect(_.asString);
+
+		File.use(~f2ContextPath ?? (thisProcess.nowExecutingPath.dirname +/+ "f2_context_full.json"), "w", { |f|
+			f.write(toJSON.(ctx));
+		});
+		"[f2] context exported.".postln;
+	};
+
+	// ═══════════════════════════════════════════════════════════
+	// G. GROW — Seed-based generative phrase engine
+	// ═══════════════════════════════════════════════════════════
+	//
+	// Companion to grow-gui. Generates multi-cycle phrases from
+	// painted seed grids with per-step locks and form transforms.
+	//
+	// Usage (generated by grow-gui):
+	//
+	//   var seed = [\K, (v:\S, d:2, p:(amp: 0.8)), \x, \H];
+	//   ~play.(\gen, ~phrase.(
+	//       seed,
+	//       (K: \xk, S: \xs, H: \xh),
+	//       (K: \xk_g, S: \xs_g, H: \xh_g),
+	//       8, ~form[\arc], nil,
+	//       (K: [~ramp[\amp, 0.30, 1.00, \exp]])
+	//   ), 32);
+	//
+	// Depth semantics:
+	//   0 = rest, 1 = hit, 2 = dup (×2), 3 = trip (×3), 4 = nest (×4 + ghost)
+	// ═══════════════════════════════════════════════════════════
+
+	// ─── G1. FORM DICTIONARY ────────────────────────────────
+	~form = ();
+	~form[\arc]     = [\id, \deepen, \deepen, \id, \id, \strip, \strip, \thin];
+	~form[\loop]    = [\id, \rot, \id, \rotL];
+	~form[\build]   = [\strip, \strip, \id, \deepen];
+	~form[\fall]    = [\deepen, \id, \strip, \thin];
+	~form[\dialog]  = [\id, \swap, \id, \swap];
+	~form[\spiral]  = [\rot, \rot, \rot, \rot, \rot, \rot, \rot, \rot];
+	~form[\breathe] = [\strip, \id, \deepen, \id, \strip, \thin, \thicken, \deepen];
+	~form[\spot]    = [\accent, \accent, \accent, \accent, \accent, \accent, \accent, \accent];
+	// New forms using extended transforms
+	~form[\decay]   = [\id, \erode, \erode, \erode, \bloom, \id, \erode, \erode];
+	~form[\grow]    = [\bloom, \id, \bloom, \deepen, \id, \erode, \id, \bloom];
+	~form[\tide]    = [\cascade, \cascade, \mirror, \cascade, \cascade, \mirror, \erode, \bloom];
+	~form[\cells]   = [\life, \life, \life, \life, \bloom, \life, \life, \life];
+	~form[\fog]     = [\diffuse, \diffuse, \id, \diffuse, \diffuse, \deepen, \diffuse, \thin];
+	~form[\canon]   = [\phase, \id, \phase, \id, \phase, \id, \phase, \id];
+	~form[\mitosis] = [\id, \split, \id, \split, \fuse, \id, \split, \erode];
+	~form[\echo]    = [\call_response, \id, \call_response, \deepen, \call_response, \strip, \call_response, \id];
+	~form[\fracGen] = [\fractal, \id, \erode, \fractal, \id, \strip, \bloom, \id];
+	~form[\gravity] = [\gravity, \id, \bloom, \gravity, \id, \cascade, \gravity, \thin];
+
+	// ─── G2. SEED CELL NORMALIZER ───────────────────────────
+	~normCell = { |cell|
+		if (cell.isNil) { (v: \x, d: 0) }
+		{
+			if (cell.isKindOf(Symbol)) {
+				if (cell == \x) { (v: \x, d: 0) }
+				{ (v: cell, d: 1) }
+			} {
+				if (cell.isKindOf(Event) and: { cell[\v].notNil }) {
+					if (cell[\d].isNil) { cell.put(\d, 1) };
+					cell
+				} {
+					(v: \x, d: 0)
+				}
+			}
+		}
+	};
+
+	// ─── G3. SEED TRANSFORMS ────────────────────────────────
+	~seedTransform = { |seed, transform, gen|
+		var result;
+		gen = gen ? 0;
+
+		result = case
+
+		{ transform == \id } { seed }
+
+		{ transform == \rot } {
+			var a = seed.collect(_.copy);
+			if (a.size > 1) { a.rotate(1) } { a }
+		}
+
+		{ transform == \rotL } {
+			var a = seed.collect(_.copy);
+			if (a.size > 1) { a.rotate(-1) } { a }
+		}
+
+		{ transform == \mir } {
+			seed.collect(_.copy).reverse
+		}
+
+		{ transform == \strip } {
+			seed.collect { |cell|
+				var c = cell.copy;
+				if (c[\d].notNil and: { c[\d] > 0 }) {
+					if (c[\d] <= 1) {
+						(v: \x, d: 0)
+					} {
+						c.put(\d, c[\d] - 1)
+					}
+				} { c }
+			}
+		}
+
+		{ transform == \deepen } {
+			seed.collect { |cell|
+				var c = cell.copy;
+				if (c[\v] != \x and: { c[\d].notNil and: { c[\d] > 0 } }) {
+					c.put(\d, (c[\d] + 1).min(4))
+				} { c }
+			}
+		}
+
+		{ transform == \thin } {
+			seed.collect { |cell, i|
+				if (i % 2 == 0) { cell.copy } { (v: \x, d: 0) }
+			}
+		}
+
+		{ transform == \thicken } {
+			seed.collect { |cell, i|
+				if (cell[\v] == \x or: { cell[\d] == 0 }) {
+					var prev = seed.wrapAt(i - 1);
+					if (prev[\v] != \x and: { prev[\d].notNil and: { prev[\d] > 0 } }) {
+						(v: prev[\v], d: 1)
+					} {
+						(v: \x, d: 0)
+					}
+				} {
+					cell.copy
+				}
+			}
+		}
+
+		{ transform == \accent } {
+			seed.collect { |cell, i|
+				if (i == (gen % seed.size) and: { cell[\v] != \x } and: { cell[\d].notNil and: { cell[\d] > 0 } }) {
+					cell.copy.put(\d, 4)
+				} {
+					cell.copy
+				}
+			}
+		}
+
+		{ transform == \swap } {
+			var roleKeys = seed.select { |c| c[\v] != \x and: { c[\d] > 0 } }
+			                    .collect { |c| c[\v] }
+			                    .asSet.asArray.sort;
+
+			if (roleKeys.size < 2) { seed.collect(_.copy) }
+			{
+				var swapMap = Dictionary.new;
+				roleKeys.do { |k, i|
+					swapMap[k] = roleKeys.wrapAt(i + 1);
+				};
+				seed.collect { |cell|
+					var c = cell.copy;
+					if (c[\v] != \x and: { c[\d] > 0 }) {
+						c.put(\v, swapMap[c[\v]] ?? c[\v])
+					};
+					c
+				}
+			}
+		}
+
+		// ─── WEIGHT-DRIVEN TRANSFORMS ───
+
+		{ transform == \erode } {
+			seed.collect { |cell|
+				var c = cell.copy;
+				if (c[\v] != \x and: { c[\d].notNil and: { c[\d] > 0 } }) {
+					var newD = c[\d] - (if (c[\d] <= 1) { 1 } { 0 });
+					if ((gen % 2 == 0) and: { c[\d] > 1 }) { newD = c[\d] - 1 };
+					if (newD <= 0) { (v: \x, d: 0) } { c.put(\d, newD); c }
+				} { c }
+			}
+		}
+
+		{ transform == \bloom } {
+			var out = seed.collect(_.copy);
+			seed.do { |cell, i|
+				if (cell[\v] != \x and: { cell[\d].notNil and: { cell[\d] >= 3 } }) {
+					// Spawn into empty neighbors
+					if (i > 0 and: { out[i-1][\v] == \x or: { out[i-1][\d] == 0 } }) {
+						out[i-1] = (v: cell[\v], d: 1);
+					};
+					if (i < (seed.size - 1) and: { out[i+1][\v] == \x or: { out[i+1][\d] == 0 } }) {
+						out[i+1] = (v: cell[\v], d: 1);
+					};
+				};
+			};
+			out
+		}
+
+		{ transform == \gravity } {
+			var heavy = seed.detectIndex { |c| c[\v] != \x and: { c[\d].notNil and: { c[\d] >= 3 } } };
+			if (heavy.isNil) { seed.collect(_.copy) } {
+				seed.collect { |cell, i|
+					var c = cell.copy;
+					if (c[\v] != \x and: { c[\d].notNil and: { c[\d] > 0 and: { c[\d] < 3 } } }) {
+						var dist = (i - heavy).abs;
+						if (dist > 2) { (v: \x, d: 0) } { c }
+					} { c }
+				}
+			}
+		}
+
+		{ transform == \cascade } {
+			var out = seed.collect(_.copy);
+			(seed.size - 1).do { |i|
+				var idx = seed.size - 1 - i;
+				var cur = out[idx];
+				var prev = out[idx - 1];
+				if (prev[\v] != \x and: { prev[\d].notNil and: { prev[\d] > 1 } }) {
+					if (cur[\v] == \x or: { cur[\d] == 0 }) {
+						out[idx] = (v: prev[\v], d: 1);
+						out[idx - 1].put(\d, prev[\d] - 1);
+					}
+				}
+			};
+			out
+		}
+
+		// ─── STRUCTURE-AWARE TRANSFORMS ───
+
+		{ transform == \phase } {
+			var shift = (gen + 1) % seed.size;
+			seed.collect(_.copy).rotate(shift.neg)
+		}
+
+		{ transform == \mirror } {
+			seed.collect(_.copy).reverse
+		}
+
+		{ transform == \invert } {
+			var voices = seed.select { |c| c[\v] != \x and: { c[\d] > 0 } }.collect { |c| c[\v] };
+			var mainVoice = if (voices.size > 0) { voices.asArray.first } { \x };
+			seed.collect { |cell|
+				if (cell[\v] == \x or: { cell[\d] == 0 }) {
+					(v: mainVoice, d: 1)
+				} {
+					(v: \x, d: 0)
+				}
+			}
+		}
+
+		{ transform == \stagger } {
+			var shift = gen + 1;
+			seed.collect(_.copy).rotate(shift)
+		}
+
+		// ─── CELLULAR AUTOMATA TRANSFORMS ───
+
+		{ transform == \life } {
+			seed.collect { |cell, i|
+				var alive = cell[\v] != \x and: { cell[\d].notNil and: { cell[\d] > 0 } };
+				var nL = if (i > 0) { seed[i-1][\v] != \x and: { seed[i-1][\d] > 0 } } { false };
+				var nR = if (i < (seed.size-1)) { seed[i+1][\v] != \x and: { seed[i+1][\d] > 0 } } { false };
+				var neighbors = nL.asInteger + nR.asInteger;
+				if (alive) {
+					// Survive with 1 neighbor, die with 0 or 2
+					if (neighbors == 1) { cell.copy } { (v: \x, d: 0) }
+				} {
+					// Born with exactly 2 neighbors
+					if (neighbors == 2) {
+						var donor = if (nL) { seed[i-1] } { seed[i+1] };
+						(v: donor[\v], d: 1)
+					} { (v: \x, d: 0) }
+				}
+			}
+		}
+
+		{ transform == \diffuse } {
+			seed.collect { |cell, i|
+				var dSelf = if (cell[\d].notNil and: { cell[\d] > 0 }) { cell[\d] } { 0 };
+				var dL = if (i > 0 and: { seed[i-1][\d].notNil }) { seed[i-1][\d] } { 0 };
+				var dR = if (i < (seed.size-1) and: { seed[i+1][\d].notNil }) { seed[i+1][\d] } { 0 };
+				var newD = ((dSelf * 2) + dL + dR / 4).round.asInteger.clip(0, 4);
+				if (newD > 0) {
+					var v = if (cell[\v] != \x) { cell[\v] } {
+						if (dL > dR and: { i > 0 }) { seed[i-1][\v] }
+						{ if (i < (seed.size-1)) { seed[i+1][\v] } { \x } }
+					};
+					if (v == \x) { (v: \x, d: 0) } { (v: v, d: newD) }
+				} { (v: \x, d: 0) }
+			}
+		}
+
+		{ transform == \fractal } {
+			// Self-similar: active cells with d>2 split into 2 subcells
+			var out = [];
+			seed.do { |cell|
+				if (cell[\v] != \x and: { cell[\d].notNil and: { cell[\d] > 2 } }) {
+					out = out.add((v: cell[\v], d: (cell[\d] - 1).max(1)));
+					out = out.add((v: cell[\v], d: 1));
+				} {
+					out = out.add(cell.copy);
+				}
+			};
+			// Trim or pad to original size
+			if (out.size > seed.size) { out = out.copyRange(0, seed.size - 1) };
+			if (out.size < seed.size) { (seed.size - out.size).do { out = out.add((v: \x, d: 0)) } };
+			out
+		}
+
+		// ─── MUSICAL TRANSFORMS ───
+
+		{ transform == \call_response } {
+			var half = (seed.size / 2).floor;
+			var call = seed.copyRange(0, half - 1);
+			var resp = call.collect { |cell|
+				var c = cell.copy;
+				if (c[\v] != \x and: { c[\d] > 0 }) {
+					c.put(\d, (c[\d] + (gen % 2 == 0).if(1, -1)).clip(1, 4))
+				};
+				c
+			}.rotate(1);
+			(call ++ resp).copyRange(0, seed.size - 1).collect(_.copy)
+		}
+
+		{ transform == \split } {
+			var out = seed.collect(_.copy);
+			seed.do { |cell, i|
+				if (cell[\v] != \x and: { cell[\d].notNil and: { cell[\d] > 2 } }) {
+					// Find nearest empty slot
+					var target = nil;
+					(1..4).do { |offset|
+						if (target.isNil) {
+							if ((i + offset) < seed.size and: {
+								out[i + offset][\v] == \x or: { out[i + offset][\d] == 0 }
+							}) { target = i + offset };
+							if (target.isNil and: { (i - offset) >= 0 and: {
+								out[i - offset][\v] == \x or: { out[i - offset][\d] == 0 }
+							} }) { target = i - offset };
+						};
+					};
+					if (target.notNil) {
+						out[target] = (v: cell[\v], d: 1);
+						out[i].put(\d, cell[\d] - 1);
+					};
+				};
+			};
+			out
+		}
+
+		{ transform == \fuse } {
+			var out = seed.collect(_.copy);
+			var i = 0;
+			while { i < (out.size - 1) } {
+				var cur = out[i]; var nxt = out[i + 1];
+				if (cur[\v] != \x and: { nxt[\v] == cur[\v] and: { cur[\d] > 0 and: { nxt[\d] > 0 } } }) {
+					out[i].put(\d, (cur[\d] + nxt[\d]).clip(1, 4));
+					out[i + 1] = (v: \x, d: 0);
+					i = i + 2;
+				} { i = i + 1 };
+			};
+			out
+		}
+
+		// Default fallback: identity
+		{ true } { seed.collect(_.copy) };
+
+		result
+	};
+
+	// ─── G4. SEED → DSL PATTERN ─────────────────────────────
+	~seedToPat = { |seed, voices, ghosts, voiceMods|
+		var steps = seed.collect { |cell|
+			var roleKey = cell[\v];
+			var depth   = cell[\d] ?? 1;
+			var params  = cell[\p];
+			var mods    = cell[\mods];
+
+			if (roleKey == \x or: { depth == 0 }) {
+				// Rest cell: params become bind-wrapped rest
+				// (state-setting only — rest events are silent)
+				if (params.notNil and: { params.isKindOf(Event) and: { params.size > 0 } }) {
+					(dsl_type: \bind, head: \x, args: [params])
+				} { \x }
+			}
+			{
+				var voice = if (voices.notNil and: { voices[roleKey].notNil })
+				            { voices[roleKey] } { roleKey };
+				var ghost = if (ghosts.notNil) { ghosts[roleKey] };
+
+				var base = case
+					{ depth == 1 } { voice }
+					{ depth == 2 } { (dsl_type: \rep, item: voice, times: 2) }
+					{ depth == 3 } { (dsl_type: \rep, item: voice, times: 3) }
+					{ depth >= 4 } {
+						if (ghost.notNil and: { ghost != \nil } and: { ghost != \x }) {
+							(dsl_type: \rep,
+								item: (dsl_type: \rand, list: [voice, ghost, voice]),
+								times: 4)
+						} {
+							(dsl_type: \rep, item: voice, times: 4)
+						}
+					}
+					{ voice };
+
+				var allMods = [];
+
+				if (params.notNil and: { params.isKindOf(Event) and: { params.size > 0 } }) {
+					allMods = allMods.add(params);
+				};
+
+				if (mods.notNil and: { mods.isKindOf(Array) }) {
+					mods.select(_.notNil).do { |m|
+						allMods = allMods.add(m);
+					};
+				};
+
+				if (voiceMods.notNil and: { voiceMods.isKindOf(Event) and: { voiceMods[roleKey].notNil } }) {
+					var rMods = voiceMods[roleKey];
+					if (rMods.isKindOf(Array)) {
+						rMods.select(_.notNil).do { |m|
+							allMods = allMods.add(m);
+						};
+					} {
+						if (rMods.notNil) { allMods = allMods.add(rMods) };
+					};
+				};
+
+				if (allMods.size > 0) {
+					(dsl_type: \bind, head: base, args: allMods)
+				} { base }
+			}
+		};
+
+		(dsl_type: \seq, list: steps)
+	};
+
+	// ─── G5. ~phrase — MAIN GENERATIVE FUNCTION ─────────────
+	~phrase = { |seed, voices, ghosts, cycles, formSeq, globalMod, voiceMods|
+		var normalizedSeed, currentSeed, cycleResults, result;
+
+		cycles   = cycles   ?? 8;
+		formSeq  = formSeq  ?? [\id];
+		voices   = voices   ?? ();
+		ghosts   = ghosts   ?? ();
+
+		normalizedSeed = seed.collect { |cell| ~normCell.(cell) };
+		currentSeed = normalizedSeed;
+
+		cycleResults = Array.new(cycles);
+		cycles.do { |cycleIdx|
+			var transform = formSeq.wrapAt(cycleIdx);
+
+			currentSeed = try {
+				~seedTransform.(currentSeed, transform, cycleIdx)
+			} { |err|
+				"[grow warn] transform '%' at cycle %: % — identity"
+					.format(transform, cycleIdx, err.errorString).postln;
+				currentSeed
+			};
+
+			cycleResults = cycleResults.add(
+				~seedToPat.(currentSeed, voices, ghosts, voiceMods)
+			);
+		};
+
+		result = (dsl_type: \seq, list: cycleResults);
+
+		if (globalMod.notNil) {
+			if (globalMod.isKindOf(Function)) {
+				try { globalMod.(result) } { |err|
+					"[grow warn] globalMod: % — skipped".format(err.errorString).postln;
+					result
+				}
+			} {
+				(dsl_type: \bind, head: result, args: [globalMod])
+			}
+		} { result }
+	};
+
+	"> GROW phrase engine ready (% forms).".format(~form.size).postln;
+
+	"> F2DSL v2 ready.".postln;
+	// §provenance штамп сборки движка — мгновенная проверка «то ли загрузилось»
+	"> F2DSL build: gate-v3 + loop-order-v3 + units-21 + cfg-sig + fx-base".postln;
+};
