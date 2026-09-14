@@ -5,14 +5,15 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     ~f2PatGroup = Group.head(s.defaultGroup);
     "[f2re] ~f2PatGroup → node %".format(~f2PatGroup.nodeID).postln;
 
-    // §layers/quant: НЕ переписываем ~play — DSL-версия уже делает всё (группа, cell-телеметрия,
-    // merge мелодических слоёв через Prout). Переписывание здесь раньше ТЕРЯЛО 5-й аргумент
-    // layers (melodySource молча умирал в remote-режиме). Сохраняем полную реализацию один раз
-    // (guard от повторного eval этого файла) и добавляем только тег сцены для /f2_branch.
+    // §layers/quant: DO NOT rewrite ~play — the DSL version already does all of it (group,
+    // per-cell telemetry, melodic layers merged through Prout). Rewriting it here used to LOSE
+    // the 5th argument, layers — melodySource died silently in remote mode. Keep the full
+    // implementation once (guarded against a second eval of this file) and add only the scene
+    // tag for /f2_branch.
     ~f2PlayDSL = ~f2PlayDSL ? ~play;
     ~play = { |key, data, dur=4, quant=4, layers|
-        // §16-B: текущая сцена = Pdef-ключ строки; rand/wrand в ~toPat подхватят его как
-        // sceneId для /f2_branch (компилятор может также класть sceneId прямо на Event).
+        // §16-B: the current scene is the row's Pdef key; rand/wrand in ~toPat pick it up as
+        // the sceneId for /f2_branch (the compiler may also put sceneId on the Event itself).
         topEnvironment[\f2Scene] = key;
         ~f2PlayDSL.value(key, data, dur, quant, layers);
     };
@@ -25,10 +26,10 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     ~f2Bridge = (busy: false, busyAt: 0);
     ~f2EvalQ = List.new;
 
-    // §eval-drain v2 CmdPeriod (panic) чистит клоки и убивает drain-рутину БЕЗ
-    // исключения — busy оставался true навсегда, и каждый следующий /f2/eval ядра
-    // молча вставал в очередь без исполнителя: деплои не исполнялись, ядро сыпало
-    // «no /f2_ack for epoch N» до полного перезапуска. Хук сбрасывает busy сам.
+    // §eval-drain v2 CmdPeriod (panic) clears the clocks and kills the drain routine WITHOUT
+    // raising — busy stayed true forever, and every later /f2/eval from the core queued up
+    // silently behind nobody: deploys never ran and the core reported «no /f2_ack for epoch N»
+    // until a full restart. The hook resets busy itself.
     CmdPeriod.add({ topEnvironment.use { ~f2Bridge.busy = false } });
 
     OSCdef(\f2_eval, { |msg|
@@ -36,40 +37,41 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
         "[f2] /eval (% chars)".format(code.size).postln;
         topEnvironment.use {
             var stale;
-            // §queue плотные эвалы НЕ скипаются, а встают в очередь: скип молча терял
-            // деплой, пришедший в окно длинного interpret (контент-бут проекта грузит
-            // сотню synthdef'ов секундами) — ядро ждало /f2_ack впустую (§7.2 алерт).
-            // Одна drain-рутина держит порядок прихода; ~f2Bridge.busy = drain жива.
+            // §queue dense evals are QUEUED, not skipped: a skip silently lost the deploy that
+            // arrived during a long interpret (a project's content boot loads a hundred
+            // synthdefs over seconds) and the core waited for a /f2_ack that never came (§7.2
+            // alert). One drain routine keeps arrival order; ~f2Bridge.busy = the drain is alive.
             ~f2EvalQ.add(code);
             if (~f2EvalQ.size > 1) { "[f2] eval queued (depth %)".format(~f2EvalQ.size).postln };
-            // §eval-drain v2 сторож на случай ЛЮБОЙ гибели рутины, не пойманной
-            // хуком: busyAt штампуется на каждом элементе; тишина >10с при непустой
-            // очереди = drain мёртв — поднимаем нового. Интерпретатор однопоточный,
-            // поэтому гонок с живым drain нет: длинный interpret просто отодвигает
-            // обработку этого сообщения до своего конца.
+            // §eval-drain v2 a watchdog for ANY death of the routine the hook does not catch:
+            // busyAt is stamped on every item; silence for >10s with a non-empty queue means the
+            // drain is dead, so raise a new one. The interpreter is single-threaded, so there is
+            // no race with a live drain: a long interpret simply defers this message's handling
+            // until it finishes.
             stale = ~f2Bridge.busy and: { (Main.elapsedTime - (~f2Bridge.busyAt ? 0)) > 10 };
             if (stale) { "⚠ [f2] eval drain wedged — restarting it".postln; ~f2Bridge.busy = false };
             if (~f2Bridge.busy.not) {
                 ~f2Bridge.busy = true;
                 ~f2Bridge.busyAt = Main.elapsedTime;
-                // §additive деплой ВСЕГДА привязан к конкретной сцене (Pdef-ключу строки):
-                // прежний Pdef.all.stop + freeAll глушил ВСЕ параллельные строки при каждом
-                // eval — при ≥2 играющих сценах запуск одной убивал остальные (несовместимо
-                // с семантикой сцен и с аддитивным /f2_eval из bootstrap). Глушение целиком —
-                // только явным /f2/hush. Группа паттернов создаётся лениво, если её ещё нет.
+                // §additive a deploy is ALWAYS bound to one scene (the row's Pdef key). The old
+                // Pdef.all.stop + freeAll silenced EVERY parallel row on every eval — with two or
+                // more scenes playing, starting one killed the rest, which is incompatible with
+                // scene semantics and with the additive /f2_eval from bootstrap. Silencing
+                // everything is what an explicit /f2/hush is for. The pattern group is created
+                // lazily, if it does not exist yet.
                 Routine({
                     topEnvironment.use {
                         if (~f2PatGroup.isNil or: { ~f2PatGroup.isPlaying.not }) {
-                            // §grp-gen ПРЕЖНЮЮ ГРУППУ ЗДЕСЬ НЕ ОСВОБОЖДАТЬ. Она и правда
-                            // копится (ветка freeAll выше стоит под .isPlaying, а группа
-                            // создаётся без .register(true), поэтому isPlaying у неё всегда
-                            // ложь) — но `.free` группы убивает её детей МОЛЧА: /n_free по
-                            // группе не шлёт /n_end на каждый узел, реестры голосов остаются
-                            // с isPlaying = true на мёртвых нодах, и следующий деплой маппит
-                            // их — флуд «/n_mapn Node not found» и тишина. Это ровно тот
-                            // отказ, что описан в f2dsl.scd §reuse. Поколения stack-шин,
-                            // которые от этого копились, подметает §bus-gen; узлы остаются
-                            // как были.
+                            // §grp-gen DO NOT FREE THE PREVIOUS GROUP HERE. It does pile up —
+                            // the freeAll branch above sits behind .isPlaying and the group is
+                            // created without .register(true), so isPlaying is always false for
+                            // it — but freeing a group kills its children SILENTLY: /n_free on a
+                            // group sends no /n_end per node, the voice registries keep
+                            // isPlaying = true on dead nodes, and the next deploy maps them: a
+                            // flood of «/n_mapn Node not found», and silence. That is the exact
+                            // failure written up in f2dsl.scd §reuse. The stack-bus generations
+                            // this leaves behind are swept by §bus-gen instead; the nodes are
+                            // left alone.
                             ~f2PatGroup = Group.head(s.defaultGroup);
                             "[f2] patGroup recreated".postln;
                         };
@@ -79,14 +81,14 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
                         var c;
                         topEnvironment.use {
                             c = ~f2EvalQ.removeAt(0);
-                            ~f2Bridge.busyAt = Main.elapsedTime;   // §eval-drain v2 пульс сторожа
+                            ~f2Bridge.busyAt = Main.elapsedTime;   // §eval-drain v2 watchdog pulse
                         };
                         topEnvironment.use {
                             try { c.interpret; "✓ F2 eval ok".postln; }
                                 { |err| ("✗ F2 eval: " ++ err.errorString).postln };
                             ~f2Bridge.busyAt = Main.elapsedTime;
                         };
-                        0.02.wait;   // кооперативный зазор между эвалами очереди
+                        0.02.wait;   // a cooperative gap between queued evals
                     };
                     topEnvironment.use { ~f2Bridge.busy = false };
                 }).play(TempoClock.default);
@@ -98,22 +100,24 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
         "[f2] /hush".postln;
         { topEnvironment.use { Pdef.all.do(_.stop);
             if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying }) { ~f2PatGroup.freeAll };
-            // §loop-order freeAll убил ПОДГРУППЫ голосов при живом patGroup — словарь
-            // подгрупп чистим, иначе следующий спавн вставлялся бы после мёртвой ноды.
-            ~f2VGroups = nil; ~f2VGrp2 !? { |d| d.clear };   // §loop-order v2 (старый ключ — миграция)
-            // §fix шины ~mb НЕ освобождаем: паттерны НЕпередеплоенных строк держат .asMap на
-            // конкретные индексы шин — free+realloc после hush давал им чужие/мёртвые шины
-            // (все live-параметры строки съезжали). Значения просто остаются; деплой их перепишет.
+            // §loop-order freeAll killed the voice SUBGROUPS while patGroup was still alive, so
+            // clear the subgroup dictionary or the next spawn would land after a dead node.
+            ~f2VGroups = nil; ~f2VGrp2 !? { |d| d.clear };   // §loop-order v2 (the old key — migration)
+            // §fix DO NOT free the ~mb buses: patterns of rows that were not redeployed hold
+            // .asMap on specific bus indices, and free+realloc after a hush handed them someone
+            // else's or a dead bus (every live parameter of the row drifted). The values simply
+            // stay put; the next deploy rewrites them.
         } }.defer;
     }, '/f2/hush').permanent_(true);
 
     // ── ModEngine bridge (v2) ────────────────────────────────────────────────
-    // v3: значения модуляции пишем в per-key CONTROL-ШИНЫ (~mb); событие маппит арг
-    //     синта на шину через .asMap (см. компилятор) → синт читает control-rate
-    //     НЕПРЕРЫВНО → модуляция двигает ДАЖЕ звучащую ноту (раньше Pdefn → лишь на онсете).
+    // v3: modulation values are written to per-key CONTROL BUSES (~mb); the event maps the
+    //     synth argument onto the bus with .asMap (see the compiler) → the synth reads it at
+    //     control rate CONTINUOUSLY → modulation moves EVEN a sounding note (Pdefn moved it only
+    //     at the onset).
     ~mb   = ~mb ?? { IdentityDictionary.new };
-    // ВНИМАНИЕ: dict.put / dict[k]=v в SC возвращает САМ СЛОВАРЬ, а не значение.
-    // Поэтому шину возвращаем явно (иначе ~mbAt.(k) отдаёт ~mb → .set/.asMap падают).
+    // CAREFUL: dict.put / dict[k]=v in SC returns THE DICTIONARY ITSELF, not the value. So the
+    // bus is returned explicitly (otherwise ~mbAt.(k) hands back ~mb and .set/.asMap fail).
     ~mbAt = { |k|
         var b = ~mb[k];
         if (b.isNil) { b = Bus.control(s, 1); ~mb.put(k, b) };
@@ -125,8 +129,9 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     // ONCE. On a clean SC boot ~mb starts empty, so deploy keys are present and only the mismatched
     // engine keys trip this. Compare a flagged key (e.g. ...__c4000320000) to the deploy's base-init
     // keys (e.g. ...__c320000) to read off the offset gap.
-    // §parity тело идентично v7-обработчику из boot.rs (bootstrap_code): оба пишут в шины ~mb,
-    // порядок загрузки двух файлов больше НЕ меняет семантику /f2_setb. Варн — раз на ключ.
+    // §parity the body is identical to the v7 handler in boot.rs (bootstrap_code): both write to
+    // the ~mb buses, so the load order of the two files no longer changes /f2_setb semantics.
+    // The warning fires once per key.
     ~f2SetbWarned = ~f2SetbWarned ? IdentitySet.new;
     OSCdef(\f2_setb, { |msg|
         topEnvironment.use {
@@ -137,21 +142,21 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
                     ~f2SetbWarned.add(k);
                     ("⚠ [f2_setb] engine key with no deploy bus (engine≠deploy): " ++ k).postln;
                 };
-                // §nan-guard NaN в шину отравляет синт до следующей записи — скипаем
+                // §nan-guard a NaN on the bus poisons the synth until the next write — skip it
                 if (v.notNil and: { v.asFloat.isNaN.not }) { ~mbAt.(k).set(v) };
                 i = i + 2;
             };
         };
     }, '/f2_setb').permanent_(true);
 
-    // §v2-sc SC-плеер вариантов: детерминированные выборы rand/wrand приходят ОТ ДВИЖКА
-    // (/f2_choice sceneKey nodeId iter idx) и складываются в ~f2Choice по ключу
-    // "<sceneKey>/<nodeId>/<iter>". ~toPat (rand/wrand с тегом v2Id) читает их на демэнде —
-    // SC играет ровно тот вариант, что просчитал движок. Движок шлёт выбор ТЕКУЩЕЙ и
-    // СЛЕДУЮЩЕЙ итерации на каждой границе (запас на demand-lookahead в целую петлю);
-    // прошлые итерации узла прибираются лениво здесь же.
+    // §v2-sc the SC-side variant player: deterministic rand/wrand choices come FROM THE ENGINE
+    // (/f2_choice sceneKey nodeId iter idx) and are stored in ~f2Choice under the key
+    // "<sceneKey>/<nodeId>/<iter>". ~toPat (rand/wrand tagged with v2Id) reads them on demand,
+    // so SC plays exactly the variant the engine computed. The engine sends the choice for the
+    // CURRENT and the NEXT iteration at every boundary (headroom for a whole-loop demand
+    // lookahead); past iterations of a node are collected lazily right here.
     ~f2Choice = ~f2Choice ?? { Dictionary.new };
-    ~f2ChoiceLog = 12;   // §diag лог первых принятых выборов (дальше — тишина)
+    ~f2ChoiceLog = 12;   // §diag log the first choices accepted (silence after that)
     OSCdef(\f2_choice, { |msg|
         topEnvironment.use {
             var scene = msg[1].asString, node = msg[2].asString,
@@ -171,30 +176,31 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     //       Mirrors the /f2_cell telemetry NetAddr. cyclePhase is debug; TS uses beatAbs.
     //       ~f2CycleBeats (topEnvironment) = cycle length in beats (= dur); nil→4.
     ~f2PhaseAddr = ~f2PhaseAddr ?? { NetAddr("127.0.0.1", 57131) };
-    // §16-B: адрес OSC-входа БЭКЕНДА (новая архитектура). Сюда шлём /f2_sync (часы) и
-    // /f2_branch (выборы rand из ~toPat). Порт = hub.scInPort (по умолчанию 57121).
+    // §16-B: the address of the BACKEND's OSC input (the new architecture). /f2_sync (the clock)
+    // and /f2_branch (rand choices out of ~toPat) go here. Port = hub.scInPort (57121 by default).
     ~f2BackendAddr = ~f2BackendAddr ?? { NetAddr("127.0.0.1", (topEnvironment[\f2BackendPort] ? 57121)) };
 
-    // §core саморегистрация Go-ядра (f2core): оно шлёт /f2/core_hello <port> со своего
-    // сокета — запоминаем адрес, зеркалим туда /f2_sync (Tdef ниже) и туда же уходят
-    // /f2_ack деплоев ядра (ack-эпилог компилирует `~f2CoreAddr ? ~f2BackendAddr ? …`).
-    // Порт ядра эфемерный — никакой статической конфигурации; повторный hello (рестарт
-    // ядра) просто перезаписывает адрес.
+    // §core the Go core (f2core) registers itself: it sends /f2/core_hello <port> from its own
+    // socket, we remember the address, mirror /f2_sync there (the Tdef below), and the core's
+    // deploy /f2_ack goes there too (the ack epilogue compiles `~f2CoreAddr ? ~f2BackendAddr ? …`).
+    // The core's port is ephemeral — no static configuration; a repeat hello (a core restart)
+    // simply overwrites the address.
     OSCdef(\f2_core_hello, { |msg, time, addr|
         topEnvironment.use {
             var port = (msg[1] ? addr.port).asInteger;
             ~f2CoreAddr = NetAddr(addr.ip, port);
-            ~f2FrameSeq = -1;   // §9 рестарт ядра сбрасывает seq кадров — принимаем заново
+            ~f2FrameSeq = -1;   // §9 a core restart resets the frame seq — start accepting again
             "[f2] core registered: %:%".format(addr.ip, port).postln;
         };
     }, '/f2/core_hello').permanent_(true);
 
-    // §9 кадровый протокол ядра: /f2_frame proto seq beat flagsN [k,fl]… valsN [k,v]…
-    // Применение атомарное в рамках датаграммы, флаги ПЕРЕД значениями (лаг сглаживателя
-    // стоит верным к приходу значения). seq монотонный — стейл/дубли дропаются; рестарт
-    // ядра детектится по /f2/core_hello (сброс ~f2FrameSeq). beat в будущем (лукахед
-    // ядра, F2_SCHED_SEC) → применение schedAbs РОВНО на бите; иначе немедленно.
-    // Переходный период: /f2_setb и /f2_setflags остаются (Node A/B), уйдут на cutover.
+    // §9 the core's frame protocol: /f2_frame proto seq beat flagsN [k,fl]… valsN [k,v]…
+    // Application is atomic within the datagram, flags BEFORE values (the smoother's lag is
+    // correct by the time the value arrives). seq is monotonic, so stale and duplicate frames
+    // are dropped; a core restart is detected by /f2/core_hello (which resets ~f2FrameSeq). A
+    // beat in the future (the core's lookahead, F2_SCHED_SEC) → schedAbs applies it EXACTLY on
+    // the beat; otherwise immediately. Transitional: /f2_setb and /f2_setflags stay (Node A/B)
+    // and go away at cutover.
     ~f2FrameSeq = ~f2FrameSeq ? -1;
     OSCdef(\f2_frame, { |msg|
         topEnvironment.use {
@@ -213,9 +219,9 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
                         if (~f2FlagApply.notNil) {
                             forBy(0, flags.size - 2, 2) { |j| ~f2FlagApply.(flags[j], flags[j + 1]) };
                         };
-                        // значения — в СЫРУЮ шину при загруженном modsmooth (его сглаживатель
-                        // сам ведёт гладкую), иначе в базовую ~mbAt (как /f2_setb).
-                        // §nan-guard NaN не пишем (отравляет шину/сглаживатель).
+                        // values go to the RAW bus when modsmooth is loaded (its smoother draws
+                        // the smooth one itself), otherwise to the plain ~mbAt (as /f2_setb does).
+                        // §nan-guard a NaN is not written (it poisons the bus and the smoother).
                         forBy(0, vals.size - 2, 2) { |j|
                             var v = vals[j + 1];
                             if (v.notNil and: { v.asFloat.isNaN.not }) {
@@ -235,10 +241,10 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
             var cb = (topEnvironment[\f2CycleBeats] ? 4).max(0.0001);
             ~f2PhaseAddr.sendMsg('/f2_phase',
                 (beatAbs / cb).frac.asFloat, beatAbs.asFloat, clock.tempo.asFloat);
-            // §6: якорь часов для бэкенда — абсолютный бит + реальное время SC (сек).
-            // Бэкенд экстраполирует фазу локально; serverTime нужен для оценки темпа.
+            // §6: the clock anchor for the backend — absolute beat + SC's wall time (seconds).
+            // The backend extrapolates phase locally; serverTime is what lets it estimate tempo.
             ~f2BackendAddr.sendMsg('/f2_sync', beatAbs.asFloat, Main.elapsedTime.asFloat);
-            // §core зеркало якоря в Go-ядро (если зарегистрировалось /f2/core_hello)
+            // §core mirror the anchor into the Go core (if it registered with /f2/core_hello)
             if (~f2CoreAddr.notNil) {
                 ~f2CoreAddr.sendMsg('/f2_sync', beatAbs.asFloat, Main.elapsedTime.asFloat);
             };

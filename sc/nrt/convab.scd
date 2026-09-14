@@ -1,7 +1,7 @@
 (
 // §conv-ir the A/B that guards convU's BUS mode. v49 gave convU a second
 // graph (`ir: sample`, PartConv) and a new live control (`preDly`) — and the
-// owner's answer on the bus mode was «непрерывно, как сейчас», so the live
+// owner's answer on the bus mode was «continuous, as it is now», so the live
 // kernel capture must render SAMPLE FOR SAMPLE what it rendered before.
 //
 //   F2_NRT_REF=/tmp/f2units_ref.scd F2_NRT_OUT=/tmp/f2nrt \

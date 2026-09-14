@@ -1,14 +1,16 @@
-// f2units.scd — §synth-mod этап (а): встроенные модульные синт-юниты + порты.
+// f2units.scd — §synth-mod: the built-in modular synth units and their ports.
 //
-// Концепт: sc/SYNTH-MODULES.md. Модуль = ПРЕСЕТ с instrument = юнит: клетки,
-// voices/artic (reatk/legato/hold), win/win-tail и модуляторы достаются от
-// пресета даром; юнит обязан лишь соблюдать конвенцию:
-//   • контролы \out \gate \t_trig \amp \i_free (+env atk/dec/sus/rel/curve);
-//   • гейтовая огибающая БЕЗ doneAction:2 (жизнью управляет пул \f2voice);
-//   • ре-атака — t_trig (Trig добавляется к gate);
-//   • всё в порт/аут — через LeakDC → Sanitize (NaN соседям не разносим);
-//   • порт-входы — InFeedback (циклы легальны ценой блока задержки),
-//     неподключённый вход = индекс −1 → сигнал глушится множителем (idx>=0);
+// Concept: sc/SYNTH-MODULES.md. A module is a PRESET whose instrument is a unit:
+// cells, voices/artic (reatk/legato/hold), win/win-tail and the modulators all come
+// from the preset for free; the unit only has to keep to the convention:
+//   • the controls \out \gate \t_trig \amp \i_free (+ env atk/dec/sus/rel/curve);
+//   • a gated envelope WITHOUT doneAction:2 (the \f2voice pool owns its life);
+//   • re-attack is t_trig (a Trig is added to gate);
+//   • everything into a port or the out goes through LeakDC → Sanitize (a NaN is
+//     not passed on to the neighbours);
+//   • port inputs are InFeedback (cycles are legal at the price of one block of
+//     delay), an unconnected input is index −1 → the signal is muted by the
+//     multiplier (idx >= 0);
 //   • §cards every PROCESSOR also declares `chainIn = -1` — the strip's stage
 //     bus, read with In.ar (same cycle, no delay: its writers sit earlier in
 //     the voice group) and SUMMED into the unit's primary port (carIn / srcIn /
@@ -58,25 +60,26 @@
 //     core) and `ld` are built, the nine other Bitwig models are FILTER.md §3 — and
 //     the cutoff bus feeding the slot stays each unit's own law.
 //
-// ПОРТЫ (§4 концепта, полифония «клон графа на голос»):
-//   ~f2Ports[\name] = (bus: Bus.audio(s, 10), wv: писательскиеГолоса 1..5)
-//   слот голоса k — стереопара bus.index + 2k;
-//   писатель k пишет слот (k % 5); читатель k читает слот (k % wv) —
-//   пары carrier[k] ⇄ mod[k] детерминированы, hold-стик держит их стабильно.
-//   ~f2PortEnsure зовёт компилятор (deploy-преамбула, wv = voices писателя);
-//   ленивый ~f2PortAt страхует ранний спавн читателя (wv деф 5).
+// PORTS (§4 of the concept, polyphony as «clone the graph per voice»):
+//   ~f2Ports[\name] = (bus: Bus.audio(s, 10), wv: writing voices 1..5)
+//   voice k's slot is the stereo pair bus.index + 2k;
+//   writer k writes slot (k % 5); reader k reads slot (k % wv) — the pairs
+//   carrier[k] ⇄ mod[k] are deterministic, and a hold stick keeps them stable.
+//   ~f2PortEnsure is called by the compiler (the deploy preamble, wv = the writer's
+//   voices); the lazy ~f2PortAt covers a reader that spawns early (wv defaults to 5).
 (
 topEnvironment.use {
 
-// §port-sum ребут/хот-своп: прежние записи ссылаются на шины ДО s.newBusAllocators
-// (мёртвые/чужие индексы) — реестр чистим, старые commit-узлы глушим; деплой
-// пересоздаст порты свежими (голоса всё равно респавнятся деплой-преамбулой).
-// §bus-gen И ШИНЫ, не только commit-узлы. Порт держит две по 10 каналов (W и R), а
-// реестр тут же выбрасывается — без .free эти двадцать каналов уходили в никуда на
-// КАЖДОЙ перезагрузке f2units, не только на первой. Освобождаем под штампом
-// аллокатора (см. ~f2StackBusRel в f2dsl): запись, пережившая ребут сервера, ссылается
-// на индексы прежней жизни, и отдать их новому аллокатору значило бы подарить ему
-// чужой живой блок — такую просто забываем.
+// §port-sum reboot / hot swap: earlier entries point at buses from BEFORE
+// s.newBusAllocators (dead or someone else's indices) — so the registry is cleared and
+// the old commit nodes silenced; the deploy recreates the ports fresh (the voices
+// respawn from the deploy preamble anyway). §bus-gen AND THE BUSES, not only the commit
+// nodes. A port holds two of them, 10 channels each (W and R), and the registry was
+// thrown away right here — without a .free those twenty channels went nowhere on EVERY
+// reload of f2units, not only the first. They are freed under the allocator stamp (see
+// ~f2StackBusRel in f2dsl): an entry that outlived a server reboot points at indices from
+// a previous life, and handing those to the new allocator would be a gift of someone else's
+// live block — such an entry is simply forgotten.
 (~f2Ports ? IdentityDictionary.new).do { |e|
 	e[\commit] !? { |c| try { c.free } };
 	if (e[\alloc] === s.audioBusAllocator) {
@@ -90,8 +93,8 @@ topEnvironment.use {
 // so a stale entry could overlap a fresh port bus. Every pool respawns on its
 // first trigger after this load (~f2UnitsVer in the fingerprint) and
 // re-allocates its stage bus.
-// §bus-gen штамп аллокатора (см. ~f2StackBusRel в f2dsl): запись, пережившая ребут
-// сервера, освобождению не подлежит — её индекс уже чужой.
+// §bus-gen the allocator stamp (see ~f2StackBusRel in f2dsl): an entry that outlived a
+// server reboot must not be freed — its index already belongs to someone else.
 (~f2StackBus ? IdentityDictionary.new).do { |e|
 	if (e[\alloc].isNil or: { e[\alloc] === s.audioBusAllocator }) {
 		e[\bus] !? { |b| try { b.free } };
@@ -99,31 +102,31 @@ topEnvironment.use {
 };
 ~f2StackBus = IdentityDictionary.new;
 
-// ВАЖНО (динамический скоуп ~): эти функции зовутся и из деплой-эвалов, и из
-// Event:play (\f2voice mkVoice), где currentEnvironment = САМО СОБЫТИЕ — голая
-// ~ссылка там тихо даёт nil (nil.value(...) → nil, затем e[\bus] падает).
-// Поэтому тела НЕ трогают ~: реестр и соседние функции — только через
-// topEnvironment явно (то же правило, что top.use в \f2voice).
-// §port-sum ДВОЙНАЯ БУФЕРИЗАЦИЯ порта. Семантика шин scsynth: первый Out.ar цикла
-// ПЕРЕЗАПИСЫВАЕТ шину (ленивая очистка), а InFeedback читателя видит ЧАСТИЧНУЮ
-// сумму на момент его позиции в дереве нод. При нескольких писателях одного слота
-// читатель слышал только тех, кто в дереве РАНЬШЕ него — «остаётся самый громкий,
-// остальные исчезают», и картина скакала при каждом редеплое (порядок менялся).
-// Теперь: писатели → W-шина; commit-узел в ХВОСТЕ дерева переносит ПОЛНУЮ сумму
-// цикла W→R (ReplaceOut); читатели читают R (InFeedback = полная сумма прошлого
-// цикла, НЕЗАВИСИМО от порядка нод). Все меж-модульные петли получают ровно один
-// блок задержки — одинаково и воспроизводимо.
-// ВАЖНО: commit не только копирует W→R, но и ОБНУЛЯЕТ W. Без обнуления шина
-// держит последний блок, когда писатели замолчали (пауза, освобождение голосов
-// на деплое, ещё не рождённый голос) — и commit гнал бы этот блок в R ВЕЧНО:
-// читатели получали застывший сигнал вместо тишины («звук залипает»).
+// IMPORTANT (the dynamic ~ scope): these functions are called both from deploy evals and
+// from Event:play (\f2voice mkVoice), where currentEnvironment is THE EVENT ITSELF — a
+// bare ~reference there quietly yields nil (nil.value(...) → nil, and then e[\bus] fails).
+// So the bodies never touch ~: the registry and the neighbouring functions are reached
+// through topEnvironment explicitly (the same rule as top.use in \f2voice).
+// §port-sum THE PORT IS DOUBLE-BUFFERED. scsynth bus semantics: the first Out.ar of a
+// cycle OVERWRITES the bus (lazy clearing), and a reader's InFeedback sees the PARTIAL
+// sum as of its own position in the node tree. With several writers on one slot the
+// reader heard only those EARLIER than it in the tree — «the loudest one survives, the
+// rest vanish» — and the picture jumped on every redeploy, because the order changed.
+// Now: writers → the W bus; a commit node at the TAIL of the tree carries the cycle's
+// FULL sum W→R (ReplaceOut); readers read R (InFeedback = the previous cycle's full sum,
+// INDEPENDENT of node order). Every cross-module loop gets exactly one block of delay —
+// uniformly and reproducibly.
+// IMPORTANT: commit does not only copy W→R, it also ZEROES W. Without that the bus holds
+// the last block once the writers fall silent (a rest, voices freed on a deploy, a voice
+// not born yet) — and commit would drive that block into R FOREVER: readers would get a
+// frozen signal instead of silence («the sound sticks»).
 SynthDef(\f2portCommit, { |w = 0, r = 0|
 	var sig = In.ar(w, 10);
 	ReplaceOut.ar(r, sig);
 	ReplaceOut.ar(w, DC.ar(0) ! 10);
 }).add;
-// §port-sum АВАРИЙНЫЙ ВЫКЛЮЧАТЕЛЬ: `~f2PortSum = false;` + редеплой → читатели
-// снова читают W напрямую (прежнее поведение, порядок нод снова значим).
+// §port-sum THE EMERGENCY SWITCH: `~f2PortSum = false;` + a redeploy → readers read W
+// directly again (the old behaviour, node order matters again).
 ~f2PortSum = ~f2PortSum ? true;
 ~f2PortCommitG = {
 	var g = topEnvironment[\f2PortCG];
@@ -138,11 +141,11 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 	var dict = topEnvironment[\f2Ports];
 	var key = name.asSymbol;
 	var e = dict[key];
-	// §bus-gen запись, пережившая s.newBusAllocators (ребут сервера при живом sclang),
-	// держит индексы прежней жизни: пользоваться ими — молча писать в чужую шину.
-	// Забываем целиком и заводим заново; освободить их нельзя по той же причине.
+	// §bus-gen an entry that outlived s.newBusAllocators (a server reboot with sclang still
+	// alive) holds indices from the previous life: using them is writing into a stranger's
+	// bus, silently. Forget it whole and build it again; freeing it is out for the same reason.
 	if (e.notNil and: { e[\alloc] !== s.audioBusAllocator }) {
-		("⚠ [f2 port] % пережил ребут сервера — шины переаллоцируются".format(key)).postln;
+		("⚠ [f2 port] % outlived a server reboot — its buses are reallocated".format(key)).postln;
 		dict.removeAt(key);
 		e = nil;
 	};
@@ -154,19 +157,19 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 		e[\wv] = writerV.asInteger.clip(1, 5);
 		if (e[\rbus].isNil) { e[\rbus] = Bus.audio(s, 10) };
 	};
-	// §port-sum commit пересоздаём НА КАЖДОМ ДЕПЛОЕ безусловно: если узел умер
-	// (ребут сервера, CmdPeriod, чужой freeAll), R замерзал бы навсегда — читатели
-	// молчат или держат последний блок, и «починить» это можно было только ребутом.
-	// Деплой теперь всегда восстанавливает тракт. Два узла на порт — дёшево.
+	// §port-sum the commit node is recreated ON EVERY DEPLOY, unconditionally: if the node
+	// died (a server reboot, CmdPeriod, someone else's freeAll) R would freeze forever —
+	// readers silent or holding the last block, and the only «fix» was a reboot. A deploy now
+	// always restores the path. Two nodes per port is cheap.
 	e[\commit] !? { |c| try { c.free } };
 	e[\commit] = nil;
 	if (topEnvironment[\f2PortSum] == false) {
-		// выключатель: читатели снова на W (прежнее поведение). Прежняя R-шина иначе
-		// теряла последнюю ссылку прямо здесь — десять каналов за каждое переключение.
+		// the switch: readers go back to W (the old behaviour). Otherwise the previous R bus
+		// lost its last reference right here — ten channels per toggle.
 		e[\rbus] !? { |b| if (b !== e[\bus]) { try { b.free } } };
 		e[\rbus] = e[\bus];
 	} {
-		if (e[\rbus] === e[\bus]) { e[\rbus] = Bus.audio(s, 10) };   // возврат из выключенного
+		if (e[\rbus] === e[\bus]) { e[\rbus] = Bus.audio(s, 10) };   // back from switched-off
 		e[\commit] = Synth(\f2portCommit,
 			[\w, e[\bus].index, \r, e[\rbus].index],
 			topEnvironment[\f2PortCommitG].value, \addToTail);
@@ -183,27 +186,28 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 	}
 };
 
-// слот ПИСАТЕЛЯ: голос k → стереопара k%5 (W-шина)
+// the WRITER's slot: voice k → stereo pair k%5 (the W bus)
 ~f2PortOutSlot = { |name, vi = 0|
 	var e = topEnvironment[\f2PortAt].value(name);
 	e[\bus].index + (2 * (vi.asInteger % 5))
 };
 
-// слот ЧИТАТЕЛЯ: голос k → стереопара k % wv на R-ШИНЕ (§port-sum: полная сумма
-// прошлого цикла через commit — не зависит от порядка нод). Фолбэк на W — старый
-// бут без commit (деградация к прежнему поведению, не тишина).
+// the READER's slot: voice k → stereo pair k % wv on the R BUS (§port-sum: the previous
+// cycle's full sum through commit — independent of node order). The fallback to W is an
+// old boot without commit (degrade to the previous behaviour, not to silence).
 ~f2PortInSlot = { |name, vi = 0|
 	var e = topEnvironment[\f2PortAt].value(name);
 	((e[\rbus] ? e[\bus]).index) + (2 * (vi.asInteger % ((e[\wv] ? 5).max(1))))
 };
 
-// §loop-cond КОНДИЦИОНЕР ПЕТЛИ на порт-входе: gain → OnePole(damp) → tanh-насыщение
-// (sat — сухой/мокрый). Стабилизирует фидбек-рекурсию: inGain <1 глушит регенерацию
-// (петля затухает вместо взрыва), inDamp гасит ВЧ в петле (туда сваливается алиасный
-// визг FM-фидбека), inSat даёт мягкий потолок амплитуды (хаос остаётся музыкальным).
-// Дефолты ПРОЗРАЧНЫ (1/0/0 → y = x байт-в-байт): существующие сейвы не меняются.
-// Одна тройка ручек на юнит — действует на ВСЕ его порт-входы; ручки модулируемы
-// как обычные параметры (шины ~mbAt), т.е. регенерацию можно вести модулятором.
+// §loop-cond THE LOOP CONDITIONER on a port input: gain → OnePole(damp) → tanh saturation
+// (sat — dry/wet). It stabilises feedback recursion: inGain <1 damps regeneration (the loop
+// decays instead of exploding), inDamp kills the highs in the loop (which is where the
+// aliased screech of FM feedback collects), inSat gives a soft amplitude ceiling (so the
+// chaos stays musical). The defaults are TRANSPARENT (1/0/0 → y = x byte for byte): existing
+// saves do not change. One triple of knobs per unit, acting on ALL of its port inputs; the
+// knobs are modulatable like any parameter (the ~mbAt buses), so a modulator can drive the
+// regeneration itself.
 ~f2CondIn = { |sig, gain = 1, damp = 0, sat = 0|
 	var y = OnePole.ar(sig * gain, damp.clip(0, 0.97));
 	(y * (1 - sat)) + (y.tanh * sat)
@@ -229,19 +233,19 @@ SynthDef(\f2chainOut, { |in = 0, out = 0, amp = 1, gate = 1, t_trig = 0, freq = 
 	Out.ar(out, In.ar(in, 2) * amp.lag(0.005));
 }).add;
 
-// §unit-eq БАЗОВЫЙ ТРЁХПОЛОСНЫЙ ЭКВАЛАЙЗЕР на выходе КАЖДОГО не-осцилляторного юнита.
-// Причина: процессоры/резонаторы/шумы копят мусор на краях спектра (гул порт-петель
-// снизу, алиасный визг фолдера/шифтера сверху) — раньше единственным лекарством был
-// внешний fx на шине, то есть отдельный узел и отдельная шина ради «убрать низ».
-// Разбиение КОМПЛЕМЕНТАРНОЕ: середина = вход − низ − верх, поэтому при 1/1/1 полосы
-// складываются обратно во ВХОД (с точностью до единиц ULP сложения — по слуху ничего
-// не меняется, существующие сейвы звучат как звучали) и на стыках нет ни провала, ни
-// горба, как было бы у трёх независимых фильтров.
-//   eqLo/eqMid/eqHi — усиление полос 0..4 (0 = полоса вырезана, 1 = как есть);
-//   eqLoF/eqHiF     — точки раздела; eqHiF всегда держим выше eqLoF (иначе полосы
-//                     перехлёстываются и середина уходит в минус).
-// Ручки модулируемы как любые параметры (шины ~mbAt): eqHi под LFO = вау-фильтр,
-// eqLo в 0 на клетке = хай-пасс по ритму.
+// §unit-eq A BASIC THREE-BAND EQ on the output of EVERY non-oscillator unit.
+// Why: processors, resonators and noises collect rubbish at both edges of the spectrum (the
+// rumble of port loops at the bottom, the aliased screech of a folder or shifter at the top)
+// — and until now the only cure was an external fx on a bus, i.e. a node and a bus of their
+// own just to «take the bottom out». The split is COMPLEMENTARY: mid = input − low − high, so
+// at 1/1/1 the bands add back up to the INPUT (to within a few ULP of the addition — nothing
+// audible changes and existing saves sound as they sounded), and the crossovers have neither
+// a dip nor a bump, as three independent filters would.
+//   eqLo/eqMid/eqHi — band gains 0..4 (0 = the band is cut, 1 = as it was);
+//   eqLoF/eqHiF     — the split points; eqHiF is always held above eqLoF (otherwise the
+//                     bands overlap and the middle goes negative).
+// The knobs are modulatable like any parameter (the ~mbAt buses): eqHi under an LFO is a
+// wah, eqLo at 0 on a cell is a high-pass played as rhythm.
 ~f2Eq3 = { |sig, lo = 1, mid = 1, hi = 1, loF = 200, hiF = 3000|
 	var fL = loF.clip(30, 2000);
 	var fH = hiF.clip(500, 16000).max(fL * 1.5);
@@ -1788,17 +1792,18 @@ if (~f2SmpPV) {
 	nil
 };
 
-// ── §synth-mod этап (в): телеметрия юнитов → каналы ядра `sc:*` ───────────
-// Юнит шлёт SendReply '/f2_chan' [значение] с replyID=telId (компилятор кладёт
-// telId в cfg, голос 0 получает арг). ~f2TelMap[telId] = "sc:<name>" пишет
-// компилированный код при деплое; OSCdef ниже форвардит в ядро (адрес ядра —
-// ~f2CoreAddr из hello, см. f2_remote_eval). Ядро NaN-гардит, кладёт в стор и
-// чистит канал по TTL (0.5с без апдейтов = писатель умер) — не залипает.
+// ── §synth-mod unit telemetry → the core's `sc:*` channels ────────────────
+// A unit sends SendReply '/f2_chan' [value] with replyID=telId (the compiler puts telId
+// in cfg, and voice 0 gets the argument). ~f2TelMap[telId] = "sc:<name>" is written by
+// the compiled code at deploy time; the OSCdef below forwards to the core (whose address
+// is ~f2CoreAddr from the hello — see f2_remote_eval). The core NaN-guards it, puts it in
+// the store and clears the channel on a TTL (0.5s without an update = the writer died), so
+// nothing sticks.
 ~f2TelMap = ~f2TelMap ? IdentityDictionary.new;
 OSCdef(\f2chanFwd, { |msg|
 	var id = msg[2].asInteger;
 	var val = msg[3];
-	var map = topEnvironment[\f2TelMap];   // не ~: окружение колбэка не гарантировано
+	var map = topEnvironment[\f2TelMap];   // not ~: the callback's environment is not guaranteed
 	var name = map !? { map[id] };
 	var core = topEnvironment[\f2CoreAddr];
 	if (name.notNil and: { core.notNil }) {
@@ -1837,18 +1842,19 @@ OSCdef(\f2headFwd, { |msg|
 	};
 }, '/f2_head', s.addr);
 
-// ── юниты ─────────────────────────────────────────────────────────────────
-// Общее: env гейтится НАПРЯМУЮ контролом \gate (EnvGen релизит на спаде gate→0),
-// doneAction: i_free (reuse ставит 0 → голос живёт; вне reuse деф 2 → самоосвоб.).
-// Ре-атака/legato/hold — циклированием \gate в \f2voice (0→1→0 на ячейку), НЕ
-// через t_trig: композитный `gate + Trig` сбивал EnvGen детект спада → залипание.
-// Выход всегда LeakDC→Sanitize; порт-вход InFeedback.ar(idx.max(0), 2) * (idx >= 0).
+// ── the units ─────────────────────────────────────────────────────────────
+// Common to all: env is gated DIRECTLY by the \gate control (EnvGen releases on the gate→0
+// fall), doneAction: i_free (reuse sets 0 → the voice lives on; outside reuse the default 2
+// frees it). Re-attack, legato and hold are done by cycling \gate in \f2voice (0→1→0 per
+// cell), NOT through t_trig: a composite `gate + Trig` confused EnvGen's fall detection and
+// the note stuck. The output is always LeakDC→Sanitize; a port input is
+// InFeedback.ar(idx.max(0), 2) * (idx >= 0).
 // §cards processors add `chainIn = -1` (stage bus, ~f2ChainIn = In.ar, no delay)
 // summed into their primary port BEFORE ~f2CondIn; sources are untouched. In a
 // strip (chainIn >= 0) the processor's env is forced to 1 — PASS-THROUGH, see
 // the contract at the top: `var env = Select.kr(chainIn >= 0, [envG, 1]);`.
 
-// FM-оператор/носитель: тональный источник, audio-FM вход (порт fmIn).
+// FM operator / carrier: a tonal source with an audio-rate FM input (the fmIn port).
 SynthDef(\fmOscU, { |out = 0, gate = 0, t_trig = 0, amp = 0.2, i_free = 2, tel_bus = 0,
 	freq = 220, ratio = 1, fmIn = -1, fmDepth = 0, inGain = 1, inDamp = 0, inSat = 0,
 	atk = 0.01, dec = 0.1, sus = 0.8, rel = 0.4, curve = -4, telId = 0|
@@ -1860,7 +1866,7 @@ SynthDef(\fmOscU, { |out = 0, gate = 0, t_trig = 0, amp = 0.2, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(sig * env * amp)) ! 2);
 }).add;
 
-// PM-оператор: фазовая модуляция (классика DX) — вход в фазу, не в частоту.
+// PM operator: phase modulation (the DX classic) — the input goes into phase, not frequency.
 SynthDef(\pmOscU, { |out = 0, gate = 0, t_trig = 0, amp = 0.2, i_free = 2, tel_bus = 0,
 	freq = 220, ratio = 1, pmIn = -1, pmDepth = 0, inGain = 1, inDamp = 0, inSat = 0,
 	atk = 0.01, dec = 0.1, sus = 0.8, rel = 0.4, curve = -4, telId = 0|
@@ -1872,8 +1878,8 @@ SynthDef(\pmOscU, { |out = 0, gate = 0, t_trig = 0, amp = 0.2, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(sig * env * amp)) ! 2);
 }).add;
 
-// Гранулярный сэмплер: зёрна сыплются пока открыт гейт; grPos/pitch/size —
-// обычные модулируемые арги (per-cell шины ~mbAt ведут их из любого модулятора).
+// Granular sampler: grains pour while the gate is open; grPos/pitch/size are ordinary
+// modulatable arguments (the per-cell ~mbAt buses drive them from any modulator).
 // §tape mode=1: grPos steers the read head — a free-running tape MOTOR at the
 // sample's natural speed × pitch (sign = direction). The control bus is only
 // the TARGET: when the motor drifts out of a small tolerance (slice jump,
@@ -1980,10 +1986,10 @@ SynthDef(\grainU, { |out = 0, gate = 0, t_trig = 0, amp = 0.5, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// Stutter-процессор: кольцевой буфер входа (порт srcIn); на триггере (фронт
-// гейта / t_trig, с вероятностью chance) лупится slice секунд ОТ МОМЕНТА
-// ТРИГГЕРА (§stut-look: чтение заякорено на пишущую голову; look сдвигает окно
-// захвата назад в прошлое). mix: 0 = прозрачная шина, 1 = только статтер.
+// Stutter processor: a ring buffer of the input (the srcIn port); on a trigger (a gate
+// front or t_trig, with probability `chance`) it loops `slice` seconds FROM THE MOMENT OF
+// THE TRIGGER (§stut-look: the read is anchored to the write head; `look` slides the capture
+// window back into the past). mix: 0 = the bus passes through, 1 = stutter only.
 SynthDef(\stutU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, slice = 0.125, pitch = 1, chance = 1, mix = 1, look = 0,
 	inGain = 1, inDamp = 0, inSat = 0,
@@ -1995,23 +2001,23 @@ SynthDef(\stutU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	var frames = 65536;
 	var buf    = LocalBuf(frames, 2).clear;
 	var inp    = ~f2CondIn.((InFeedback.ar(srcIn.max(0), 2) * (srcIn >= 0)) + ~f2ChainIn.(chainIn), inGain, inDamp, inSat);
-	// §stut-look запись — явным фазором (кольцо), чтобы ЗНАТЬ позицию пишущей головы.
+	// §stut-look the write uses an explicit phasor (a ring) so that the write head's position
 	var wr     = Phasor.ar(0, 1, 0, frames);
 	var rec    = BufWr.ar(inp, buf, wr);
-	// ре-нарезка и на фронте гейта (под reuse t_trig не едет), и по t_trig
+	// re-slice both on the gate front (under reuse t_trig does not move) and on t_trig
 	var trig   = (Trig.kr(g, 0.001) + Trig.kr(t_trig, 0.001)).min(1) * (TRand.kr(0, 1, g) < chance);
 	var fr     = (slice.clip(0.01, 1.3) * SampleRate.ir).min(frames);
-	// §stut-look КОРЕНЬ «лупит с задержкой, когда звук уже утих»: раньше читался
-	// АБСОЛЮТНЫЙ регион [0, fr) буфера, никак не привязанный к пишущей голове —
-	// свежий звук попадал в луп только когда голова кольца СЛУЧАЙНО проходила через
-	// [0, fr), т.е. с лагом до 1.36 с (сразу после спавна обе головы в нуле, поэтому
-	// «после деплоя работает», потом едет). Теперь чтение якорится на позицию записи,
-	// ЗАЩЁЛКНУТУЮ триггером: луп = ровно slice секунд от момента триггера.
-	//   look (сек, 0..1.3) — сдвиг окна захвата НАЗАД в прошлое: 0 = от триггера
-	//   вперёд (первый проход играет живой вход и одновременно пишет его — транзиент
-	//   захвачен); look = slice = лупится слайс, ЗАКОНЧИВШИЙСЯ на триггере (то, что
-	//   только что прозвучало); между ними окно седлает триггер. Модулируем как всё.
-	//   Защитный блок за головой (blk): чтение на самой голове = гонка порядка UGen.
+	// §stut-look THE ROOT of «it loops late, once the sound has already died»: the read used
+	// to take the ABSOLUTE region [0, fr) of the buffer, tied to nothing about the write head
+	// — fresh sound entered the loop only when the ring's head HAPPENED to pass through
+	// [0, fr), i.e. with a lag of up to 1.36 s (right after a spawn both heads are at zero,
+	// which is why «it works after a deploy» and then drifts). Now the read is anchored to the
+	// write position LATCHED BY THE TRIGGER: the loop is exactly `slice` seconds from the trigger.
+	//   look (seconds, 0..1.3) — slides the capture window BACK into the past: 0 = forward from
+	//   the trigger (the first pass plays the live input and writes it at the same time — the
+	//   transient is captured); look = slice = it loops the slice that ENDED at the trigger (what
+	//   was just heard); in between, the window straddles the trigger. Modulatable like anything.
+	//   The guard block behind the head (blk): reading at the head itself is a UGen-order race.
 	var blk    = SampleRate.ir * ControlDur.ir;
 	var w0     = Latch.ar(wr, K2A.ar(trig));
 	var ph     = (w0 - blk - (look.clip(0, 1.3) * SampleRate.ir)
@@ -2035,8 +2041,8 @@ SynthDef(\stutU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// Хаос-генератор (ванильные Logistic + Crackle): audio-текстура и/или
-// FM/AM-источник в порт; rate сглаживает (kr-модулятор из аудио — этап (в)).
+// Chaos generator (plain Logistic + Crackle): an audio texture and/or an FM/AM source into
+// a port; `rate` smooths it.
 SynthDef(\chaosU, { |out = 0, gate = 0, t_trig = 0, amp = 0.3, i_free = 2, tel_bus = 0,
 	chaos = 3.8, rate = 200, blend = 0.4,
 	atk = 0.05, dec = 0.1, sus = 1, rel = 0.6, curve = -4, telId = 0,
@@ -2051,9 +2057,9 @@ SynthDef(\chaosU, { |out = 0, gate = 0, t_trig = 0, amp = 0.3, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))) ! 2);
 }).add;
 
-// Стохастический источник: dust-пинги с вероятностью — перкуссивная пыль
-// сама по себе и модулятор через порт (стохастический FM/AM). Гейты-каналы
-// для ЧУЖИХ юнитов — этап (б); телеметрия /f2_chan — этап (в).
+// Stochastic source: dust pings with a probability — percussive dust in its own right, and a
+// modulator through a port (stochastic FM/AM). It also drives gate channels for OTHER units
+// and reports /f2_chan telemetry.
 SynthDef(\stochU, { |out = 0, gate = 0, t_trig = 0, amp = 0.4, i_free = 2, tel_bus = 0,
 	dens = 6, prob = 0.7, freq = 900, decay = 0.12,
 	atk = 0.01, dec = 0.05, sus = 1, rel = 0.3, curve = -4, telId = 0,
@@ -2067,16 +2073,16 @@ SynthDef(\stochU, { |out = 0, gate = 0, t_trig = 0, amp = 0.4, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig.tanh * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))) ! 2);
 }).add;
 
-// ── §glitch-units модально-перкуссионный набор ────────────────────────────
-// Пять юнитов под богатый перкуссивный/модальный глитч. Конвенции те же
-// (gate/i_free/telId, LeakDC→Sanitize, InFeedback-входы через ~f2CondIn);
-// у comb/pluck рекурсия ВНУТРЕННЯЯ (семпл-точная, стабильная) — это «кирпичи»
-// устойчивых петель, в отличие от меж-модульных блочных петель портов.
+// ── §glitch-units the modal-percussive set ────────────────────────────────
+// Five units for rich percussive and modal glitch. Same conventions as the rest
+// (gate/i_free/telId, LeakDC→Sanitize, InFeedback inputs through ~f2CondIn); in comb and
+// pluck the recursion is INTERNAL (sample-accurate, stable) — these are the «bricks» of
+// steady loops, unlike the cross-module block loops of the ports.
 
-// Модальный резонатор: банк из 6 Ringz-мод. Возбуждение — клик на фронте гейта
-// (click) + шумовая примесь (noiseAmt, пока гейт открыт) + ЧУЖОЕ аудио (порт exIn) —
-// т.е. любым модулем можно «бить» по резонатору. inharm тянет отношения мод от
-// гармоничных к колокольно-металлическим, bright — наклон амплитуд, decMul — звон.
+// Modal resonator: a bank of 6 Ringz modes. Excitation is a click on the gate front (click)
+// plus a noise admixture (noiseAmt, while the gate is open) plus SOMEONE ELSE'S audio (the
+// exIn port) — i.e. any module can «strike» the resonator. inharm pulls the mode ratios from
+// harmonic towards bell-like and metallic, bright tilts the amplitudes, decMul is the ring.
 SynthDef(\modalU, { |out = 0, gate = 0, t_trig = 0, amp = 0.4, i_free = 2, tel_bus = 0,
 	exIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	freq = 180, inharm = 0.3, bright = 0.5, decMul = 0.4, click = 1, noiseAmt = 0,
@@ -2099,9 +2105,9 @@ SynthDef(\modalU, { |out = 0, gate = 0, t_trig = 0, amp = 0.4, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.((sig * env * amp).tanh, eqLo, eqMid, eqHi, eqLoF, eqHiF))) ! 2);
 }).add;
 
-// Karplus-Strong: щипок/струна-перкуссия (Pluck = встроенная СТАБИЛЬНАЯ рекурсия).
-// Возбуждение — шумовой бёрст на гейте + порт exIn; fb — время жизни струны,
-// plDamp — демпфер петли (глухая ↔ звонкая), burstFreq — окрас щипка.
+// Karplus-Strong: a pluck / string percussion (Pluck is a built-in STABLE recursion).
+// Excitation is a noise burst on the gate plus the exIn port; fb is the string's lifetime,
+// plDamp the loop's damper (dull ↔ bright), burstFreq the colour of the pluck.
 SynthDef(\pluckU, { |out = 0, gate = 0, t_trig = 0, amp = 0.5, i_free = 2, tel_bus = 0,
 	exIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	freq = 220, fb = 0.6, plDamp = 0.35, burst = 1, burstFreq = 2500,
@@ -2121,9 +2127,9 @@ SynthDef(\pluckU, { |out = 0, gate = 0, t_trig = 0, amp = 0.5, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))) ! 2);
 }).add;
 
-// Перкуссивный шум-осциллятор: резонансный фильтр по шуму/треску со свипом высоты
-// на онсете (pEnv/pDec — глубина/время свипа: клики, снейры, зэпы). res к 1 —
-// фильтр звенит почти тоном; crackle подмешивает хаотический треск.
+// Percussive noise oscillator: a resonant filter over noise or crackle with a pitch sweep at
+// the onset (pEnv/pDec — the depth and time of the sweep: clicks, snares, zaps). res near 1
+// makes the filter ring almost at a pitch; crackle mixes in a chaotic crackle.
 SynthDef(\noiseU, { |out = 0, gate = 0, t_trig = 0, amp = 0.5, i_free = 2, tel_bus = 0,
 	freq = 900, res = 0.4, pEnv = 0.5, pDec = 0.06, crackle = 0,
 	atk = 0.0005, dec = 0.04, sus = 0.4, rel = 0.15, curve = -4, telId = 0,
@@ -2139,9 +2145,9 @@ SynthDef(\noiseU, { |out = 0, gate = 0, t_trig = 0, amp = 0.5, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.((sig * env * amp).tanh, eqLo, eqMid, eqHi, eqLoF, eqHiF))) ! 2);
 }).add;
 
-// Комб-процессор: CombC по входу (порт srcIn) — металлические хвосты/тональные
-// гребёнки; рекурсия ВНУТРИ UGen'а (семпл-точная, устойчивая при любом fb 0..1).
-// combFreq — «нота» гребёнки, fb — время звона, damp — ВЧ-демпфер ПЕРЕД петлёй.
+// Comb processor: CombC over the input (the srcIn port) — metallic tails and tonal combs;
+// the recursion is INSIDE the UGen (sample-accurate, stable at any fb 0..1). combFreq is the
+// comb's «note», fb the ring time, damp a high-frequency damper BEFORE the loop.
 SynthDef(\combU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	combFreq = 220, fb = 0.6, damp = 0.2, mix = 1,
@@ -2160,9 +2166,9 @@ SynthDef(\combU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.((sig * env * amp).tanh, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// Фолдер/крашер-процессор: драйв → вейвфолд → sr/бит-редукция по входу (srcIn) —
-// глитч-шейпинг прямо В ПЕТЛЕ (fold жёстко ограничивает амплитуду ⇒ ещё один
-// стабилизатор рекурсии, но с характером). tone прибирает верхний мусор.
+// Folder / crusher processor: drive → wavefold → sample-rate and bit reduction over the input
+// (srcIn) — glitch shaping right IN THE LOOP (fold clamps the amplitude hard, so it is one
+// more stabiliser of recursion, but one with a character). tone tidies the rubbish up top.
 SynthDef(\foldU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	fDrive = 0.3, foldAmt = 0.5, crush = 1, tone = 0.8, mix = 1,
@@ -2182,15 +2188,15 @@ SynthDef(\foldU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.((sig * env * amp).tanh, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// ── §mod-suite кросс-модуляция БЕЗ умножения ──────────────────────────────
-// Сдвиг всех частот на герцы (негармонично!), грануло-питчшифт с рекурсией
-// (шиммер), огибающая ЧУЖОГО сигнала как VCA по трём полосам (голосовые/
-// ритмические пады). Все — процессоры (порт-входы). vocU здесь — единственный
-// выживший носитель↔модулятор: он занял место amU в §cut v49.
+// ── §mod-suite cross-modulation WITHOUT multiplication ────────────────────
+// Shifting every frequency by a number of hertz (inharmonic!), granular pitch shift with
+// recursion (shimmer), and the envelope of SOMEONE ELSE'S signal as a three-band VCA (vocal
+// and rhythmic pads). All of them are processors (port inputs). vocU is the one surviving
+// carrier ↔ modulator here: it took amU's place in §cut v49.
 
-// Частотный сдвигатель (SSB): сдвиг ВСЕХ частот на shift Гц — рушит гармоничность
-// (колокола/дроны из любого материала); fb — рекурсия «парикмахерского шеста»
-// (каждый оборот сдвигает ещё раз, внутр. tanh держит петлю).
+// Frequency shifter (SSB): shifts EVERY frequency by `shift` Hz — it destroys harmonicity
+// (bells and drones out of any material); fb is the «barber pole» recursion (each turn
+// shifts again, an internal tanh holds the loop).
 SynthDef(\shiftU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	shift = 120, fb = 0.3, mix = 1,
@@ -2209,8 +2215,8 @@ SynthDef(\shiftU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// Шиммер: грануло-питчшифт (pRatio, окно фикс. 0.18с) с рекурсией fb — классика
-// «октава вверх в петле» = стеклянные пад-хвосты; pDisp — рассев питча (хор/муть).
+// Shimmer: granular pitch shift (pRatio, window fixed at 0.18s) with fb recursion — the
+// «octave up in the loop» classic = glassy pad tails; pDisp scatters the pitch (chorus, haze).
 SynthDef(\shimU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	pRatio = 2, pDisp = 0, fb = 0.4, mix = 0.5,
@@ -2230,10 +2236,10 @@ SynthDef(\shimU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// Вокодер-фолловер: огибающие модулятора (modIn) по 3 полосам ведут амплитуду
-// носителя (carIn) в тех же полосах — «modIn говорит носителем»: ритм-гейты,
-// говорящие пады. sens — чувствительность, hard — экспандер (резче провалы),
-// vAtk/vRel — скорость фолловеров.
+// Vocoder follower: the modulator's envelopes (modIn) in 3 bands drive the carrier's
+// amplitude (carIn) in the same bands — «modIn speaks through the carrier»: rhythm gates,
+// talking pads. sens is the sensitivity, hard an expander (sharper dips), vAtk/vRel the
+// speed of the followers.
 SynthDef(\vocU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	carIn = -1, chainIn = -1, modIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	sens = 1, hard = 0, vAtk = 0.005, vRel = 0.12,
@@ -2256,11 +2262,11 @@ SynthDef(\vocU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus =
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.((sig * env * amp).tanh, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// ── §pad-drum источники: суб/кик и слоёный пад ─────────────────────────────
+// ── §pad-drum sources: sub/kick and the layered pad ───────────────────────
 
-// Суб-осциллятор / кик-движок: синус с питч-свипом на онсете (pEnv/pDec — глубина
-// и время: 808-суб → панч-кик → том), fDrive — сатурация тела, click — щелчок атаки.
-// Перкуссия = sus 0 + короткий dec; суб-бас = sus 1.
+// Sub oscillator / kick engine: a sine with a pitch sweep at the onset (pEnv/pDec — depth
+// and time: 808 sub → punchy kick → tom), fDrive saturates the body, click is the attack's
+// click. Percussion = sus 0 and a short dec; sub bass = sus 1.
 SynthDef(\subU, { |out = 0, gate = 0, t_trig = 0, amp = 0.7, i_free = 2, tel_bus = 0,
 	freq = 55, pEnv = 0.6, pDec = 0.08, fDrive = 0.2, click = 0.3,
 	atk = 0.001, dec = 0.2, sus = 0.4, rel = 0.25, curve = -4, telId = 0|
@@ -2276,9 +2282,9 @@ SynthDef(\subU, { |out = 0, gate = 0, t_trig = 0, amp = 0.7, i_free = 2, tel_bus
 	Out.ar(out, Sanitize.ar(LeakDC.ar(sig * env * amp)) ! 2);
 }).add;
 
-// Пад: стек из 7 расстроенных пил + суб-октава, стерео-разброс, медленное «дыхание»
-// голосов (move) и общий тон-фильтр. Самодостаточный слой для комплексных падов;
-// богатый гармониками носитель для vocU/specU.
+// Pad: a stack of 7 detuned saws plus a sub octave, stereo spread, slow «breathing» of the
+// voices (move) and a common tone filter. A self-sufficient layer for complex pads, and a
+// harmonically rich carrier for vocU and specU.
 SynthDef(\padU, { |out = 0, gate = 0, t_trig = 0, amp = 0.35, i_free = 2, tel_bus = 0,
 	freq = 110, dtn = 0.15, wide = 0.7, subAmt = 0.3, move = 0.2, tone = 0.6,
 	atk = 0.8, dec = 0.3, sus = 0.8, rel = 1.2, curve = -4, telId = 0|
@@ -2330,12 +2336,12 @@ SynthDef(\chipU, { |out = 0, gate = 0, t_trig = 0, amp = 0.35, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(sig * env * amp)) ! 2);
 }).add;
 
-// ── §spec-suite спектральный сюит: гармоники / FFT-процессор / транзиенты ──
+// ── §spec-suite the spectral suite: harmonics / FFT processor / transients ─
 
-// Аддитивный осциллятор: 12 парциалов; nHarm — сколько звучит, slope — спад
-// амплитуд, odd — баланс нечёт/чёт, stretch — негармоническое растяжение
-// (1 = гармонично, >1 — «рояльно»/колокольно), shimmer — медленное дыхание
-// парциалов. Спектрально-точный источник для падов и носителей.
+// Additive oscillator: 12 partials; nHarm is how many sound, slope the amplitude falloff,
+// odd the odd/even balance, stretch an inharmonic stretch (1 = harmonic, >1 = «piano-like»
+// or bell-like), shimmer a slow breathing of the partials. A spectrally precise source for
+// pads and carriers.
 SynthDef(\harmU, { |out = 0, gate = 0, t_trig = 0, amp = 0.35, i_free = 2, tel_bus = 0,
 	freq = 220, nHarm = 8, slope = 0.5, odd = 0.5, stretch = 1, shimmer = 0.2,
 	atk = 0.05, dec = 0.1, sus = 0.8, rel = 0.6, curve = -4, telId = 0|
@@ -2343,7 +2349,7 @@ SynthDef(\harmU, { |out = 0, gate = 0, t_trig = 0, amp = 0.35, i_free = 2, tel_b
 	var env  = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1, curve), g, doneAction: i_free);
 	var sig  = Mix(12.collect { |k|
 		var i  = k + 1;
-		var ob = if (i.odd) { 1 } { -1 };   // нечёт +, чёт − → odd-ручка их взвешивает
+		var ob = if (i.odd) { 1 } { -1 };   // odd +, even − → the odd knob weighs them
 		var w  = (1 + (ob * ((odd * 2) - 1))).clip(0, 1);
 		var a  = ((1 / i) ** (slope.clip(0, 1) * 2.5)) * w * (i <= nHarm.clip(1, 12));
 		var sh = 1 + (LFNoise2.kr(0.23 + (k * 0.11)) * shimmer.clip(0, 1) * 0.5);
@@ -2353,10 +2359,10 @@ SynthDef(\harmU, { |out = 0, gate = 0, t_trig = 0, amp = 0.35, i_free = 2, tel_b
 	Out.ar(out, Sanitize.ar(LeakDC.ar(sig * env * amp)) ! 2);
 }).add;
 
-// FFT-процессор по входу: размазка магнитуд (smear), сдвиг бинов (bShift, негарм.
-// транспозиция), заморозка спектра (freeze >0.5 — спектральный дрон из момента),
-// случайная гребёнка бинов (scomb, пере-бросается на каждом онсете). Один юнит —
-// целое поле cutting-edge обработки; ручки модулируемы.
+// FFT processor over the input: magnitude smearing (smear), bin shifting (bShift, inharmonic
+// transposition), a spectral freeze (freeze >0.5 — a spectral drone out of one moment), and a
+// random comb of bins (scomb, re-thrown on every onset). One unit covering a whole field of
+// cutting-edge processing; the knobs are modulatable.
 SynthDef(\specU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	smear = 0, bShift = 0, freeze = 0, scomb = 0, mix = 1,
@@ -2379,10 +2385,10 @@ SynthDef(\specU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	Out.ar(out, Sanitize.ar(LeakDC.ar(~f2Eq3.(sig * env * amp, eqLo, eqMid, eqHi, eqLoF, eqHiF))));
 }).add;
 
-// Транзиент-шейпер: делит вход на атаки и тело (быстрый/медленный фолловеры),
-// trans — усиление/подавление транзиентов, body — тела (0..2, 1 = как есть),
-// snap — сглаживание переключения. trans>1+body<1 = сухие щёлкающие перкуссии
-// из чего угодно; trans<1+body>1 = размытые пад-хвосты без атак.
+// Transient shaper: splits the input into attacks and body (a fast and a slow follower),
+// trans boosts or suppresses the transients, body the bodies (0..2, 1 = as it was), snap
+// smooths the switching. trans>1 with body<1 = dry clicking percussion out of anything;
+// trans<1 with body>1 = smeared pad tails with no attack.
 SynthDef(\tranU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus = 0,
 	srcIn = -1, chainIn = -1, inGain = 1, inDamp = 0, inSat = 0,
 	trans = 1, body = 1, snap = 0.15,
@@ -2649,8 +2655,8 @@ if (s.serverRunning) {
 // samples (~90 ms); kSpan < 1 shortens it (tighter, brighter kernel). kGain
 // compensates convolution level loss. UNCHANGED since v48, deliberately:
 // sc/nrt/convab.scd renders this path through the PREVIOUS build and through
-// this one and requires max |Δ| == 0 at preDly 0 — the owner's «непрерывно,
-// как сейчас», in numbers rather than in intent.
+// this one and requires max |Δ| == 0 at preDly 0 — the owner's «continuous,
+// as it is now», in numbers rather than in intent.
 //
 // `ir: sample` — an impulse response from a FILE through PartConv, the ordinary
 // half of the device: the IR is read at the `irLen` trim, levelled and prepared
@@ -2693,14 +2699,15 @@ if (s.serverRunning) {
 			var ker  = (~f2CondIn.(InFeedback.ar(kerIn.max(0), 2).sum * 0.5, inGain, inDamp, inSat) * (kerIn >= 0));
 			var trig = (Trig.kr(g, 0.001) + Trig.kr(t_trig, 0.001)).min(1);
 			var kdur = (4096 * kSpan.clip(0.1, 1)) / SampleRate.ir;
-			// запись ядра: строго ПОСЛЕ триггера, kdur секунд с нуля буфера (никакого
-			// кольца — ядро всегда в правильном порядке, транзиент в голове)
+			// the core's recording: strictly AFTER the trigger, kdur seconds from the start of the
+			// buffer (no ring — the core is always in the right order, transient at the head)
 			var rec  = Trig1.ar(K2A.ar(trig), kdur);
-			// idle (rec=0) — фаза за пределами буфера: BufWr с loop:0 туда НЕ пишет
-			// (иначе простаивающий голос вечно затирал бы нулями голову ядра)
+			// idle (rec=0) — the phase is outside the buffer: BufWr with loop:0 does NOT write there
+			// (otherwise an idle voice would forever wipe the core's head with zeroes)
 			var wpos = (Phasor.ar(K2A.ar(trig), 1, 0, 4097).min(4095) * rec) + ((1 - rec) * 5000);
 			var w    = BufWr.ar(ker * rec, kbuf, wpos, 0);
-			// свап ядра — когда запись ЗАКОНЧИЛАСЬ (спад rec): свежий хит уже в буфере
+			// the core is swapped when the recording HAS FINISHED (the rec fall): the fresh hit is
+			// already in the buffer by then
 			var kswp = Trig.ar(1 - rec, 0.001);
 			wet = Convolution2.ar(inp, kbuf, kswp, 4096) * 0.02 * kGain.clip(0.1, 8);
 		};
@@ -2736,7 +2743,7 @@ SynthDef(\xspecU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus
 	var monoC = car.sum * 0.5;
 	var cA = FFT(LocalBuf(2048), monoC);
 	var cB = FFT(LocalBuf(2048), mod);
-	// PV-цепи деструктивны: каждой комбинации — своя копия карьера
+	// PV chains are destructive: every combination gets its own copy of the quarry
 	var c1 = PV_Copy(cA, LocalBuf(2048));
 	var c2 = PV_Copy(cA, LocalBuf(2048));
 	var c3 = PV_Copy(cA, LocalBuf(2048));
@@ -2776,7 +2783,7 @@ SynthDef(\scatU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	var hSlow  = Amplitude.ar(hitSrc, 0.08, 0.3);
 	var hit    = (Trig.ar(hFast > (hSlow + threshold.clip(0.001, 1)), 0.03)
 		+ Trig.ar(K2A.ar(Trig.kr(g, 0.001) + Trig.kr(t_trig, 0.001)), 0.03)).min(1);
-	// пачка: nGrain зёрен за scat секунд после хита
+	// the burst: nGrain grains over `scat` seconds after the hit
 	var burst  = Decay.ar(hit, scat.clip(0.01, 0.5));
 	var gtrig  = Impulse.ar((nGrain.clip(1, 16) / scat.clip(0.01, 0.5)).min(400)) * (burst > 0.01);
 	var w0     = Latch.ar(wr, hit);

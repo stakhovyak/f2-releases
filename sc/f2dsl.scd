@@ -267,26 +267,27 @@
 					}, 1);
 				}
 				{ type == \rand } {
-					// §16-B: выбор ветки rand делается в demand-time (за s.latency до звука) → шлём /f2_branch
-					// бэкенду. nodeId/sceneId компилятор кладёт на Event: nodeId = id контейнера дерева
-					// (= randId в SessionModel бэкенда), sceneId = id строки. Нет nodeId (ручной DSL) → как
-					// раньше, без эмиссии (бэкенд тогда over-gate'ит rand — звук-безопасно).
-					// Распределение идентично прежнему (list.size.rand == .choose), просто ловим индекс.
+					// §16-B: the rand branch is chosen at demand time (s.latency before the sound) → send
+					// /f2_branch to the backend. The compiler puts nodeId/sceneId on the Event: nodeId is
+					// the id of the tree container (= randId in the backend's SessionModel), sceneId the
+					// row's id. No nodeId (hand-written DSL) → as before, nothing is emitted (the backend
+					// then over-gates rand — sound-safe). The distribution is identical to the old one
+					// (list.size.rand == .choose); we simply catch the index now.
 					var list = obj[\list];
 					var nodeId = obj[\nodeId];
 					var idxMap = obj[\idxMap];
 					var sceneId = obj[\sceneId] ? topEnvironment[\f2Scene];
 					Plazy({
-						// §v2-sc плеер вариантов: если компилятор дал v2Id/v2Dur и движок доставил
-						// выбор этой итерации (~f2Choice по ключу "<scene>/<id>/<iter>", iter =
-						// floor(beats/durПетли) с эпсилоном от float-края границы) — играем ЕГО.
-						// Нет записи (движок не подключён / самый первый демэнд) — прежний бросок.
+						// §v2-sc the variant player: if the compiler gave us v2Id/v2Dur and the engine
+						// delivered this iteration's choice (~f2Choice under the key "<scene>/<id>/<iter>",
+						// iter = floor(beats/loopDur) with an epsilon off the float edge of the boundary),
+						// play THAT one. No entry (engine not connected, or the very first demand) — the old throw.
 						var v2got, idx, outIdx, v2key;
 						if (obj[\v2Id].notNil and: { obj[\v2Dur].notNil } and: { ~f2Choice.notNil }) {
 							v2key = ((sceneId ? \default).asString ++ "/" ++ obj[\v2Id].asString
 								++ "/" ++ ((thisThread.beats / obj[\v2Dur]) + 1e-4).floor.asInteger).asSymbol;
 							v2got = ~f2Choice[v2key];
-							// §diag первые демэнд-чтения: hit (индекс движка) или nil → случайный бросок
+							// §diag the first demand reads: hit (the engine's index) or nil → a random throw
 							if ((topEnvironment[\f2RandLog] ? 8) > 0) {
 								topEnvironment[\f2RandLog] = (topEnvironment[\f2RandLog] ? 8) - 1;
 								("[f2] rand? " ++ v2key ++ " → " ++ (v2got ? "nil(roll)")).postln;
@@ -303,8 +304,8 @@
 					});
 				}
 				{ type == \wrand } {
-					// §16-B: то же для wrand. windex(weights) даёт ВЗВЕШЕННЫЙ индекс с тем же распределением,
-					// что прежний items.wchoose(weights) — просто теперь у нас есть индекс для /f2_branch.
+					// §16-B: the same for wrand. windex(weights) gives a WEIGHTED index with the same
+					// distribution as the old items.wchoose(weights) — only now we have the index for /f2_branch.
 					var pairs = obj[\pairs];
 					var items = pairs.collect(_[0]);
 					var weights = pairs.collect(_[1]).normalizeSum;
@@ -312,7 +313,7 @@
 					var idxMap = obj[\idxMap];
 					var sceneId = obj[\sceneId] ? topEnvironment[\f2Scene];
 					Plazy({
-						// §v2-sc как в \rand: выбор движка из ~f2Choice приоритетен, бросок — фоллбэк
+						// §v2-sc as in \rand: the engine's choice from ~f2Choice wins, the throw is the fallback
 						var v2got, idx, outIdx, v2key;
 						if (obj[\v2Id].notNil and: { obj[\v2Dur].notNil } and: { ~f2Choice.notNil }) {
 							v2key = ((sceneId ? \default).asString ++ "/" ++ obj[\v2Id].asString
@@ -567,8 +568,8 @@
 
 	// High-resolution FX ramp event type
 	Event.addEventType(\fxSet, {
-		// §fx-chan имя → НАСТОЯЩИЙ Ndef через алиасы рэка: голое имя могло создать
-		// ПУСТОЙ Ndef («эффект убит»), а модуляция уходила в никуда (bake-путь)
+		// §fx-chan name → the REAL Ndef through the rack's aliases: a bare name could create an
+		// EMPTY Ndef («the effect is dead») while the modulation went nowhere (the bake path)
 		var d = topEnvironment[\dsl], nd = ~fxTarget;
 		if (d.notNil and: { d[\fxTargets].notNil }) { nd = d[\fxTargets].at(~fxTarget) ? ~fxTarget };
 		Ndef(nd).set(~fxParam, ~fxVal);
@@ -666,28 +667,30 @@
 	};
 
 	// ═══════════════════════════════════════════════════════════
-	// §reuse — ПЕРЕИСПОЛЬЗОВАНИЕ СИНТА (постоянные голоса вместо спавна-на-ноту)
+	// §reuse — SYNTH REUSE (persistent voices instead of a spawn per note)
 	// ───────────────────────────────────────────────────────────
-	// Пул постоянных синтов НА ПРЕСЕТ (voices 1..5). Событие ячейки НЕ спавнит новый синт —
-	// берёт голос из пула, МАППИТ его модулируемые арги на per-cell шины (~mbAt) и гейтит.
-	// Голос жив всегда (i_free=0) → grPos читает уже наполненную базой шину БЕЗ гонки рождения
-	// (щелчок онсета уходит), число нод ограничено (≤ voices·пресетов). Тумблер ~f2Reuse=false
-	// + пере-деплой → ТОЧНОЕ прежнее поведение (спавн). reattack: gate-off через sustain
-	// (0→1 на след. ноте = ре-атака); legato: gate держится 1 (глайд). Перекрытие в пуле:
-	// поколение голоса (gen) не даёт старому gate-off резать новую ноту того же голоса.
-	// Синты без контрола \i_free самоосвобождаются на релизе → голос пересоздаётся (деградация
-	// до спавна), собственные синты F2 (sliceS/edge/matter) держат \i_free=0 → полный reuse.
+	// A pool of persistent synths PER PRESET (voices 1..5). A cell's event does NOT spawn a new
+	// synth — it takes a voice from the pool, MAPS its modulatable arguments onto the per-cell
+	// buses (~mbAt) and gates it. The voice is always alive (i_free=0), so grPos reads a bus that
+	// is already filled from the base WITHOUT a birth race (the onset click goes away), and the
+	// node count is bounded (≤ voices·presets). The toggle ~f2Reuse=false plus a redeploy gives
+	// back the EXACT old behaviour (spawning). reattack: gate-off through sustain (0→1 on the next
+	// note = a re-attack); legato: the gate stays at 1 (glide). Overlap inside the pool: a voice's
+	// generation (gen) stops an old gate-off from cutting a new note on the same voice. Synths
+	// without an \i_free control free themselves on release → the voice is recreated (a graceful
+	// degradation to spawning); F2's own synths (sliceS/edge/matter) hold \i_free=0 → full reuse.
 	// ═══════════════════════════════════════════════════════════
 	~f2Reuse = ~f2Reuse ? true;
 	~f2Voices = ~f2Voices ? IdentityDictionary.new;
-	~f2VGroups = nil;   // §loop-order v2 миграция: прежний словарь с ядовитым parent-ивaром — в мусор
-	// §reuse освобождение голосов СТРОКИ (стоп/выключение строки И начало каждого деплоя — см.
-	//   компилятор). Иначе постоянные голоса i_free=0 висят: legato/hold держат gate → звук не
-	//   глохнет; а после /f2/hush ~f2PatGroup.freeAll убивает голоса МОЛЧА (/g_freeAll не шлёт
-	//   /n_end) — isPlaying остаётся true, и следующий деплой маппит МЁРТВЫЕ ноды → флуд
-	//   «/n_mapn Node not found». Поэтому из словаря убираем сразу, а set/free шлём с ПОДАВЛЕНИЕМ
-	//   ошибки (нода могла быть уже убита freeAll — «not found» не спамит). Гейт-офф → .free после
-	//   хвоста (мягкий релиз, если нода ещё жива).
+	~f2VGroups = nil;   // §loop-order v2 migration: the old dictionary with its poisoned parent ivar goes
+	// §reuse freeing a ROW's voices (a stop or a row switched off, AND the beginning of every
+	//   deploy — see the compiler). Otherwise persistent i_free=0 voices hang about: legato and
+	//   hold keep the gate up so the sound never dies; and after a /f2/hush ~f2PatGroup.freeAll
+	//   kills the voices SILENTLY (/g_freeAll sends no /n_end) — isPlaying stays true, and the
+	//   next deploy maps DEAD nodes → a flood of «/n_mapn Node not found». So they leave the
+	//   dictionary at once, and set/free are sent with the error SUPPRESSED (the node may already
+	//   have been killed by freeAll — «not found» must not spam). Gate off → .free after the tail
+	//   (a soft release, if the node is still alive).
 	// §stack voice accessors. A pooled voice is either a plain Synth or a STACK
 	// PROXY — an Event (grp: Group, nodes: id → Synth, out: output id) built by
 	// mkVoice for a composite preset. §cards strips build the same proxy plus
@@ -762,35 +765,34 @@
 			if (d[\sink].size > 0) { v[\sink] !? { |n| n.map(*d[\sink]) } };
 		} { v.map(param, idx) };
 	};
-	// §bus-gen освобождение записи реестра stage-шин. Запись помнит АЛЛОКАТОР, у
-	// которого взяла шину: после s.newBusAllocators (ребут сервера при живом sclang)
-	// аллокатор — новый объект, а индекс из прежней жизни давно выдан кому-то ещё, и
-	// .free отдал бы ему чужой живой блок. Не совпал — просто забываем запись.
+	// §bus-gen freeing a stage-bus registry entry. An entry remembers the ALLOCATOR it took its
+	// bus from: after s.newBusAllocators (a server reboot with sclang still alive) the allocator is
+	// a new object, and an index from the previous life was long since handed to someone else, so
+	// a .free would give them away someone else's live block. No match — just forget the entry.
 	~f2StackBusRel = { |o|
 		if (o.notNil and: { o[\alloc] === s.audioBusAllocator }) { try { o[\bus].free } };
 	};
-	// §bus-gen хоронит ПРЕЖНИЕ ПОКОЛЕНИЯ того же пула. poolKey — «строка|пресет@nodeID
-	// группы», и nodeID меняется на каждом hush/релонче: записи старых поколений
-	// оставались в реестре навсегда вместе со своими шинами (реестр никто не обходил),
-	// так что за долгую сессию пул audio-шин сервера выедался — Bus.audio отдавал nil,
-	// а событие голоса падало на `.index` у nil. Новое поколение хоронит все прежние:
-	// их группа снята, читать эти шины некому. Освобождение отложено на 0.5 с — тем же
-	// запасом, что и мягкая отставка §cfg-sig: голоса прежнего поколения могли ещё
-	// доигрывать релиз, и шина под ними не должна уйти под другого хозяина мгновенно.
-	// §bus-park СРОК отставки. Шина обязана пережить голоса, которые с неё читали, а их
-	// освобождают на РАЗНЫХ часах: сцена — через 0.4 БИТА (TempoClock), мягкая отставка
-	// §cfg-sig — через 0.4 СЕКУНДЫ. На медленном темпе 0.4 бита это почти секунда, и
-	// фиксированные полсекунды отдали бы индекс под ещё звучащим голосом. Отсюда общий
-	// знаменатель: «после голосов, плюс десятая».
+	// §bus-gen buries the PREVIOUS GENERATIONS of the same pool. poolKey is «row|preset@the group's
+	// nodeID», and that nodeID changes on every hush or relaunch: entries of old generations stayed
+	// in the registry forever together with their buses (nobody ever walked the registry), so over a
+	// long session the server's audio bus pool was eaten up — Bus.audio started returning nil and a
+	// voice event failed on `.index` of nil. A new generation buries all the previous ones: their
+	// group is gone and nobody is left to read those buses. The freeing is deferred by 0.5 s — the
+	// same headroom as the soft retirement in §cfg-sig: voices of the previous generation may still
+	// be playing out their release, and the bus under them must not change owner instantly.
+	// §bus-park THE RETIREMENT DELAY. A bus has to outlive the voices that read from it, and those
+	// are freed on DIFFERENT clocks: a scene after 0.4 BEATS (TempoClock), the soft retirement of
+	// §cfg-sig after 0.4 SECONDS. At a slow tempo 0.4 beats is nearly a second, and a fixed half
+	// second would hand the index away under a voice that is still sounding. Hence the common
+	// denominator: «after the voices, plus a tenth».
 	~f2StackBusAfterBeats = { |beats = 0.4| ((beats * TempoClock.default.beatDur).max(0.4)) + 0.1 };
-	// §bus-park отставка записи. Раньше каждое место отставки снимало запись с реестра и
-	// держало её ТОЛЬКО в замыкании отложенного вызова — а CmdPeriod чистит запланированные
-	// функции, и шина, уже снятая с учёта, но не дождавшаяся своего .free, терялась без
-	// единой ссылки: текло ровно то, что чинилось. Теперь снятая запись ждёт в списке со
-	// СВОИМ сроком, и любая следующая отставка сливает всё, что успело созреть — один
-	// потерянный вызов больше ничего не стоит. Срок — по Main.elapsedTime, как и везде в
-	// этом движке: отметку ставят из TempoClock-рутины, а сливают по SystemClock, и часы
-	// тут не должны иметь значения.
+	// §bus-park retiring an entry. Every retirement site used to take the entry off the registry and
+	// hold it ONLY in the closure of a deferred call — and CmdPeriod clears scheduled functions, so a
+	// bus already off the books but not yet .free'd was lost without a single reference: exactly what
+	// was being fixed, leaking. Now a retired entry waits in a list with ITS OWN due time, and any
+	// later retirement drains everything that has matured — one lost call costs nothing any more. The
+	// due time is on Main.elapsedTime, as everywhere else in this engine: the mark is set from a
+	// TempoClock routine and drained on SystemClock, and the clock must not matter here.
 	~f2StackBusRetire = { |e, delay = 0.5|
 		if (e.notNil) {
 			e[\due] = Main.elapsedTime + delay;
@@ -813,7 +815,7 @@
 		var ps = poolKey.asString, at, pre;
 		ps.do { |c, i| if (c == $@) { at = i } };
 		if (at.notNil) {
-			pre = ps.copyRange(0, at);            // «строка|пресет@», граница по @
+			pre = ps.copyRange(0, at);            // «row|preset@», the boundary is the @
 			reg.keys.asArray.do { |k|
 				if (k != poolKey and: { k.asString.beginsWith(pre) }) {
 					topEnvironment[\f2StackBusRetire].value(reg[k],
@@ -835,14 +837,14 @@
 			e !? { |o| topEnvironment[\f2StackBusRel].value(o) };
 			if (e.isNil) { topEnvironment[\f2StackBusGen].value(reg, poolKey) };
 			e = (bus: Bus.audio(s, 2 * n), n: n, alloc: s.audioBusAllocator);
-			// Пустой аллокатор возвращает nil. Раньше nil-запись ЛОЖИЛАСЬ В РЕЕСТР,
-			// и пул оставался сломанным до конца сессии даже после того, как шины
-			// освобождались: следующий вызов видел e[\n] == n и отдавал тот же nil.
-			// Не кэшируем провал — и говорим о нём вслух, иначе это просто тишина.
+			// An empty allocator returns nil. That nil entry used to GO INTO THE REGISTRY, and the
+			// pool stayed broken for the rest of the session even after the buses were freed: the
+			// next call saw e[\n] == n and handed back the same nil. Do not cache a failure — and say
+			// so out loud, because otherwise it is just silence.
 			if (e[\bus].isNil) {
 				reg.removeAt(poolKey);
 				e = nil;
-				("✗ f2: не выделить stack-шину (% кан.) пулу % — пул audio-шин сервера исчерпан; поднимите s.options.numAudioBusChannels и перезагрузите сервер").format(2 * n, poolKey).postln;
+				("✗ f2: cannot allocate a stack bus (% ch) for pool % — the server's audio bus pool is exhausted; raise s.options.numAudioBusChannels and reboot the server").format(2 * n, poolKey).postln;
 			} {
 				reg[poolKey] = e;
 			};
@@ -867,11 +869,11 @@
 				};
 			};
 		};
-		// §bus-gen стоп строки забирает и ЕЁ stage-шины. Реестр ~f2StackBus эта функция
-		// не трогала вовсе, поэтому каждая (строка × пресет), хоть раз сыгравшая за
-		// сессию, держала свою стерео-пачку до самого ребута сервера — а пул audio-шин
-		// у scsynth один на всё. Освобождаем тем же отложением 0.4 с, что и голоса:
-		// они как раз доигрывают релиз на этих шинах.
+		// §bus-gen stopping a row takes ITS stage buses too. This function did not touch the
+		// ~f2StackBus registry at all, so every (row × preset) that had played even once in a session
+		// held its stereo pack until the server was rebooted — and scsynth has one audio bus pool for
+		// everything. They are freed with the same 0.4 s deferral as the voices: those are playing out
+		// their release on exactly these buses.
 		sreg !? { |reg|
 			reg.keys.asArray.do { |k|
 				if (k.asString.beginsWith(pre)) {
@@ -888,9 +890,9 @@
 		var def = ev[\f2def];
 		var cfg = ev[\f2cfg] ? IdentityDictionary.new;
 		var instr = ev[\instrument];
-		// §fix ev[\group] в СОБЫТИИ — ЛЕНИВАЯ функция (не Node), .nodeID на ней падал
-		//   («Message 'nodeID' not understood»). Берём РЕАЛЬНУЮ группу паттерна ~f2PatGroup:
-		//   в неё же играет Pdef и её же освобождает redeploy/hush → голоса чистятся верно.
+		// §fix ev[\group] IN THE EVENT is a LAZY function (not a Node), and .nodeID on it failed
+		//   («Message 'nodeID' not understood»). Take the REAL pattern group ~f2PatGroup: that is what
+		//   Pdef plays into and what a redeploy or hush frees → the voices are cleaned up correctly.
 		var grp = top[\f2PatGroup];
 		var sd = SynthDescLib.global.at(instr);
 		var ctrl = if (sd.notNil) { sd.controlNames } { [] };
@@ -997,31 +999,30 @@
 				};
 			};
 		};
-		if (grp.isKindOf(Node).not) { grp = s.defaultGroup };   // не Node → дефолт-группа сервера
-		// two-step (ловушка dict[k]=v возвращает приёмник); на практике словарь уже создан DSL-инитом
+		if (grp.isKindOf(Node).not) { grp = s.defaultGroup };   // not a Node → the server's default group
+		// two-step (the trap: dict[k]=v returns the receiver); in practice the DSL init already made it
 		if (voices.isNil) { voices = IdentityDictionary.new; top[\f2Voices] = voices };
-		// §reuse poolKey = СТРОКА|пресет@группа: пул на (строку × пресет), чтобы стоп строки
-		//   освобождал ровно её голоса (~f2FreeSceneVoices), а не чужие.
+		// §reuse poolKey = ROW|preset@group: a pool per (row × preset), so that stopping a row
+		//   frees exactly its own voices (~f2FreeSceneVoices) and not someone else's.
 		poolKey = ((ev[\f2scene] ? \_).asString ++ "|" ++ def.asString ++ "@" ++ grp.nodeID.asString).asSymbol;
 
-		// §loop-order ДЕТЕРМИНИРОВАННЫЙ порядок голосов: подгруппа на (строка×пресет),
-		// вставленная по СОРТИРОВКЕ defKey среди подгрупп того же родителя. Порядок нод
-		// раньше зависел от порядка ПЕРВЫХ онсетов (addToHead при спавне) — а он гуляет
-		// (rand-ветки, redeploy). Для петель портов это фатально: InFeedback даёт 0 или
-		// 1 блок задержки на хоп В ЗАВИСИМОСТИ ОТ ПОРЯДКА НОД, т.е. одна и та же петля
-		// звучала по-разному от запуска к запуску. Сортировка по defKey делает порядок
-		// (и блочные задержки петель) воспроизводимыми всегда. Родитель — ~f2PatGroup;
-		// смена родителя (hush → новая группа) пересоздаёт подгруппу.
-		// ВАЖНО: ключ родителя в записи — \par, НЕ \parent: у Event/IdentityDictionary
-		// \parent — служебный слот цепочки прототипов (чтение уходит в parent-lookup по
-		// Group → «Message not understood», событие гибнет = съеденная нота). try —
-		// страховка: ЛЮБОЙ сбой §loop-order деградирует в спавн прямо в patGroup
-		// (прежнее поведение), но не убивает ноту.
+		// §loop-order A DETERMINISTIC VOICE ORDER: a subgroup per (row × preset), inserted by
+		// SORTING on defKey among the subgroups of the same parent. Node order used to depend on
+		// the order of the FIRST onsets (addToHead at spawn) — and that wanders (rand branches,
+		// redeploys). For port loops it is fatal: InFeedback gives 0 or 1 block of delay per hop
+		// DEPENDING ON NODE ORDER, i.e. the same loop sounded different from run to run. Sorting
+		// by defKey makes the order — and the loops' block delays — reproducible every time. The
+		// parent is ~f2PatGroup; changing parent (hush → a new group) recreates the subgroup.
+		// IMPORTANT: the parent's key in the entry is \par, NOT \parent: on Event/IdentityDictionary
+		// \parent is the service slot of the prototype chain (a read goes into a parent lookup on
+		// the Group → «Message not understood» and the event dies = a swallowed note). The try is
+		// insurance: ANY failure of §loop-order degrades to a spawn straight into patGroup (the old
+		// behaviour) rather than killing the note.
 		vgrp = try {
-			// §loop-order v3 ЛОВУШКА dict[k]=v: присваивание возвращает СЛОВАРЬ-ПРИЁМНИК
-			// (см. канон у ~mbAt) — `top[\k] ?? { top[\k] = Dict.new }` на ПЕРВОМ спавне
-			// отдавало topEnvironment; keysValuesDo шёл по ВСЕМУ окружению и падал 'at'
-			// на первом же Group/Bus. Только явный two-step.
+			// §loop-order v3 THE dict[k]=v TRAP: assignment returns THE RECEIVING DICTIONARY (see
+			// the canonical case at ~mbAt) — `top[\k] ?? { top[\k] = Dict.new }` handed back
+			// topEnvironment on the FIRST spawn; keysValuesDo then walked the WHOLE environment and
+			// failed on 'at' at the first Group or Bus. Only an explicit two-step will do.
 			var vgs = top[\f2VGrp2];
 			var e;
 			if (vgs.isNil) { vgs = IdentityDictionary.new; top[\f2VGrp2] = vgs; top[\f2VGroups] = nil };
@@ -1055,16 +1056,16 @@
 			var sy;
 			if (hasFree) { a = a ++ [\i_free, 0] };
 			if (ev[\buf].notNil) { a = a ++ [\buf, ev[\buf]] };
-			// §synth-mod порты (f2units.scd): выход голоса vi → слот порта; порт-входы →
-			// слоты писателя (vi % wv). Слоты фиксированы на весь срок жизни голоса —
-			// ставятся при спавне; отсутствие хелперов кричит §port-guard ниже, а флаг
-			// |h в cfgSig пересоберёт пул, когда f2units догрузится.
+			// §synth-mod ports (f2units.scd): the voice's output vi → a port slot; port inputs → the
+			// writer's slots (vi % wv). The slots are fixed for the voice's whole life — set at
+			// spawn; a missing helper shouts through §port-guard below, and the |h flag in cfgSig
+			// rebuilds the pool once f2units has finished loading.
 			if (po.notNil and: { top[\f2PortOutSlot].notNil }) {
 				a[1] = top[\f2PortOutSlot].(po, vi);
 			};
-			// §port-guard раньше отсутствие хелперов (f2units не загрузился) деградировало
-			// МОЛЧА: голос порт-писателя оставался на прямом выходе и «звучал снаружи
-			// порта» без единой строчки в консоли. Теперь кричим — причину видно сразу.
+			// §port-guard a missing helper (f2units not loaded) used to degrade SILENTLY: the
+			// port-writer's voice stayed on the direct output and «sounded outside the port» without
+			// a single line in the console. Now it shouts — the cause is visible at once.
 			if ((po.notNil or: { pins.notNil }) and: { top[\f2PortOutSlot].isNil }) {
 				("⚠ [f2 ports] % requests ports (portOut/portIns) but f2units is NOT loaded — voice falls back to the direct out".format(def)).postln;
 			};
@@ -1086,8 +1087,8 @@
 				stk.do { |u| (u[\ins] ? ()).keysValuesDo { |an, src|
 					if (srcIds.includes(src).not) { srcIds = srcIds.add(src) } } };
 				sb = top[\f2StackBusAt].(poolKey, srcIds.size * nv);
-				// §bus-guard та же страховка, что в chain-ветке: пустой пул шин не должен
-				// ронять событие (ошибка в Event:play рвёт поток паттерна навсегда).
+				// §bus-guard the same insurance as in the chain branch: an empty bus pool must not
+				// kill the event (an error inside Event:play breaks the pattern's stream forever).
 				srcIds.do { |id, si| srcSlot[id] = if (sb.isNil) { a[1] } { sb.index + (2 * ((si * nv) + vi)) } };
 				vg.register(true);
 				stk.do { |u|
@@ -1170,14 +1171,14 @@
 				} {
 					if (nStage > 0) { sb = top[\f2StackBusAt].(poolKey, nStage * nv) };
 				};
-				// §bus-guard шина стадии могла НЕ выделиться (пул audio-шин сервера пуст —
-				// ~f2StackBusAt уже сказал об этом вслух и, в отличие от прежнего
-				// поведения, не закэшировал провал). Раньше `sb.index` у nil здесь
-				// поднимал ошибку ПРЯМО В СОБЫТИИ — а ошибка внутри Event:play рвёт
-				// поток паттерна, и строка замолкала целиком и навсегда. Теперь стрип
-				// вырождается: карточки пишут прямо в выход (сумма вместо цепочки),
-				// сток не спавнится (иначе он читал бы собственный выход), нота жива,
-				// и первый же триггер после освобождения шин собирает стрип как надо.
+				// §bus-guard the stage bus may have FAILED to allocate (the server's audio bus pool
+				// is empty — ~f2StackBusAt has already said so out loud and, unlike the old
+				// behaviour, did not cache the failure). `sb.index` on nil here used to raise RIGHT
+				// INSIDE THE EVENT — and an error inside Event:play breaks the pattern's stream, so
+				// the row went silent entirely and forever. Now the strip degenerates: the cards
+				// write straight to the output (a sum instead of a chain), the sink is not spawned
+				// (it would be reading its own output), the note lives, and the first trigger after
+				// the buses come back assembles the strip properly.
 				slot = { |k| if (sb.isNil) { a[1] } { sb.index + (2 * ((k * nv) + vi)) } };
 				vg.register(true);
 				// `ci` — the card's index in the compiled strip: the playhead
@@ -1317,7 +1318,7 @@
 						};
 					};
 				};
-				if (hasSink and: { sb.notNil }) {   // §bus-guard без шины стадии стока нет
+				if (hasSink and: { sb.notNil }) {   // §bus-guard without a stage bus there is no sink
 					// the output node, LAST in the group: final stage → resolved out × preset level
 					pamp = ev[\amp];
 					if (pamp.isNumber.not) { pamp = 1 };
@@ -1331,61 +1332,61 @@
 					if (ctrl.includes(argName)) { a = a ++ [argName, top[\f2PortInSlot].(pn, vi)] };
 				};
 			};
-			// §synth-mod телеметрия: канал `sc:*` пишет ОДИН голос пресета (vi=0),
-			// иначе значения голосов перемежались бы (флаттер канала).
+			// §synth-mod telemetry: an `sc:*` channel is written by ONE voice of the preset (vi=0),
+			// otherwise the voices' values would interleave (channel flutter).
 			if (cfg[\telId].notNil and: { vi == 0 } and: { ctrl.includes(\telId) }) {
 				a = a ++ [\telId, cfg[\telId]];
 			};
-			// §loop-order в СВОЮ подгруппу хвостом: голоса пресета идут по vi, подгруппы —
-			// по defKey ⇒ полный порядок нод воспроизводим при любом порядке онсетов.
+			// §loop-order into ITS OWN subgroup, at the tail: a preset's voices go by vi and the
+			// subgroups by defKey ⇒ the full node order is reproducible whatever the onset order.
 			if (stk.isNil and: { chn.isNil }) {
 				sy = Synth(instr, a, vgrp, \addToTail);
-				sy.register(true);   // assumePlaying=true: свежий голос сразу «жив» (isPlaying), не мёртв до /n_go
+				sy.register(true);   // assumePlaying=true: a fresh voice is «alive» (isPlaying) at once, not dead until /n_go
 				tempoMap.(sy, ctrl);
 			};
 			sy;
 		};
 
-		// пул: сверяем ГРУППУ по ИДЕНТИЧНОСТИ (===), а не только nodeID в ключе — после redeploy/
-		// hush старая группа освобождена (голоса мертвы), а SC может ПЕРЕВЫДАТЬ тот же nodeID новой
-		// группе → ключ совпал бы, а голоса дохлые (флуд «/n_mapn Node not found»). Иная группа →
-		// свежий пул. (Отдельный мёртвый голос страхуем поштучно ниже.)
-		// §orphan-fix СЛЕПОК cfg (voices+artic) в пуле. Structural-редеплой при смене
-		//   voices/artic сигнатуру меняет, НО §smooth-restart свапает лишь source Pdef и
-		//   НЕ пересоздаёт группу — поэтому старый пул выживал с ПРЕЖНИМ числом голосов.
-		//   При voices 3→1 голоса 1..2 больше не получали событий: если были на gate=1
-		//   (нота/hold) — ЗАЛИПАЛИ навсегда (огибающая «не отпускала», x.set(gate,0) мимо —
-		//   это осиротевший узел, не тот, что видит юзер). Слепок разошёлся → глушим ВСЕ
-		//   узлы старого пула по nodeID (ошибку «нет узла» давим: вдруг группа их уже сняла)
-		//   и строим пул заново под текущий cfg.
-		// §cfg-sig слепок = ВСЁ, что запекается в аргументы спавна (см. mkVoice):
-		// инструмент, маршрут выхода (слот portOut ИЛИ шина ev[\out]), порт-входы,
-		// telId, буфер сэмпла. Раньше здесь были только voices|artic — смена
-		// маршрутизации (outBus → «internal» порт, другой порт, другая fx-шина,
-		// смена синта пресета) честно проходила structural-редеплой и обновляла
-		// ~f2ReuseCfg, но ЖИВЫЕ голоса пула не пересоздавались (слепок совпадал) и
-		// продолжали писать в СТАРУЮ шину до случайной гибели пула (стоп ИХ строки,
-		// hush, смена voices/artic) — «поменял выход, а звучит по-старому,
-		// применилось на N-й перезапуск всего». Теперь любой сдвиг спавн-конфига
-		// пересоздаёт пул на первом же триггере после редеплоя.
-		// Не ловится (осознанно): слот порт-входа зависит ещё и от wv ПИСАТЕЛЯ на
-		// момент спавна — правится сменой voices самого писателя (его же респавн).
+		// the pool: the GROUP is compared by IDENTITY (===), not only by the nodeID in the key —
+		// after a redeploy or hush the old group is freed (its voices dead), and SC may REISSUE the
+		// same nodeID to a new group → the key would match while the voices are corpses (a flood of
+		// «/n_mapn Node not found»). A different group → a fresh pool. (A single dead voice is
+		// covered one by one below.) §orphan-fix A SNAPSHOT of cfg (voices+artic) in the pool. A
+		//   structural redeploy on a voices/artic change does change the signature, BUT
+		//   §smooth-restart swaps only the source Pdef and does NOT recreate the group — so the old
+		//   pool survived with the FORMER voice count. On voices 3→1, voices 1..2 stopped receiving
+		//   events: if they were at gate=1 (a note or a hold) they STUCK forever (the envelope never
+		//   released, and x.set(gate,0) missed — that is an orphaned node, not the one the user
+		//   sees). Snapshot diverged → silence ALL nodes of the old pool by nodeID (the «no such
+		//   node» error is suppressed: the group may already have taken them) and rebuild the pool.
+		// §cfg-sig the snapshot is EVERYTHING that is baked into the spawn arguments (see mkVoice):
+		// the instrument, the output route (the portOut slot OR the ev[\out] bus), the port inputs,
+		// telId, the sample buffer. It used to hold voices|artic only — so a change of routing
+		// (outBus → an «internal» port, a different port, a different fx bus, a change of the
+		// preset's synth) honestly went through a structural redeploy and updated ~f2ReuseCfg, but
+		// the pool's LIVE voices were not recreated (the snapshot matched) and went on writing to
+		// the OLD bus until the pool happened to die (their row stopped, a hush, a voices/artic
+		// change) — «I changed the output and it still sounds the old way; it applied on the Nth
+		// restart of everything». Now any shift of the spawn config recreates the pool on the first
+		// trigger after the redeploy.
+		// Deliberately NOT caught: a port input's slot also depends on the WRITER's wv at the
+		// moment of the spawn — fixed by changing the writer's own voices (which respawns it).
 		cfgSig = nv.asString ++ "|" ++ artic.asString
 			++ "|s" ++ instr.asString
 			++ "|o" ++ (cfg[\portOut] ? ev[\out] ? 0).asString
 			++ "|t" ++ (cfg[\telId] ? 0).asString
 			++ "|b" ++ (ev[\buf].tryPerform(\bufnum) ? ev[\buf] ? "").asString
-			// ВНИМАНИЕ: имя арга НЕ `pi` — это зарезервированная константа π в sclang
-			// (лексер отдаёт литерал числа → «syntax error, unexpected PIE»).
+			// CAREFUL: the argument is NOT named `pi` — that is the reserved constant π in sclang
+			// (the lexer hands back a numeric literal → «syntax error, unexpected PIE»).
 			++ "|i" ++ (cfg[\portIns] !? { |pins|
 				pins.keys.asArray.collect(_.asString).sort.collect { |k|
 					k ++ ":" ++ pins[k.asSymbol].asString
 				}.join(",")
 			} ? "")
-			// §port-guard флаг наличия порт-хелперов НА МОМЕНТ СПАВНА (только для
-			// пресетов с портами): голос, рождённый ДО загрузки f2units, остаётся на
-			// прямом выходе — когда хелперы появляются, слепок расходится и первый же
-			// триггер пересобирает пул уже с настоящей маршрутизацией.
+			// §port-guard a flag for whether the port helpers existed AT SPAWN TIME (only for
+			// presets with ports): a voice born BEFORE f2units loaded stays on the direct output —
+			// when the helpers appear the snapshot diverges and the very next trigger rebuilds the
+			// pool with the real routing.
 			++ (if (cfg[\portOut].notNil or: { cfg[\portIns].notNil })
 				{ "|h" ++ top[\f2PortOutSlot].notNil.asString } { "" })
 			// §units-ver a units reload bumps ~f2UnitsVer ⇒ every pool fingerprint
@@ -1444,9 +1445,9 @@
 			pool = (synths: Array.fill(nv, { |i| mkVoice.(i) }), rr: 0, gen: Array.fill(nv, 0), grp: grp, cfgSig: cfgSig);
 			voices[poolKey] = pool;
 		};
-		// §hold прилипание к ОДНОМУ голосу: пробег смежных ячеек продолжает тот же
-		// голос — один сросшийся гейт без ретригеров (раунд-робин отдавал бы след.
-		// ячейку другому голосу, и отложенный гейт-офф прежнего некому отменить).
+		// §hold sticking to ONE voice: a run of adjacent cells continues on the same voice — one
+		// merged gate with no retriggers (round-robin would hand the next cell to another voice,
+		// and nobody would be left to cancel the previous one's deferred gate-off).
 		if (nv <= 1) { idx = 0 } {
 			if (artic == \hold) {
 				idx = pool[\hidx] ? 0;
@@ -1457,9 +1458,9 @@
 		pool[\hidx] = idx;
 		voice = pool[\synths][idx];
 		if (voice.isNil or: { top[\f2VPlaying].(voice).not }) {
-			// §orphan-fix перед заменой глушим прежний узел по nodeID: если isPlaying —
-			//   ложь у ещё ЖИВОГО голоса (register(true) без /n_go), замена в пуле осиротила
-			//   бы звучащий узел (gate завис). Мёртвый узел — ошибка давится, no-op.
+			// §orphan-fix before replacing, silence the previous node by nodeID: if isPlaying is
+			//   false on a voice that is still ALIVE (register(true) without /n_go), replacing it in
+			//   the pool would orphan a sounding node (gate stuck). A dead node: error suppressed, no-op.
 			// §cards a proxy counts as dead when ANY card node self-freed
 			//   (~f2VPlaying); the n_free goes to its GROUP (~f2VNode), so the
 			//   surviving cards and the sink are freed with it — nothing leaks.
@@ -1467,13 +1468,13 @@
 				if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) } };
 			voice = mkVoice.(idx); pool[\synths][idx] = voice; respawned = true;
 		};
-		// §gen-fix КОРНЕВОЙ БАГ (жил с самого §reuse): `arr[i] = v` в sclang возвращает
-		// САМ МАССИВ, а не значение (та же ловушка, что документирована для dict[k]=v).
-		// Из-за `myGen = (pool[\gen][idx] = …)` myGen был МАССИВОМ, и gen-гард
-		// `pool[\gen][idx] == myGen` (число == массив) давал ВСЕГДА false → гейт-офф
-		// резался ВСЕГДА → гейты копились на 1 → залипание. Отсюда и «hold залипал
-		// всегда», и оживление reatk/legato ровно тогда, когда гейт-офф шёл серверным
-		// бандлом БЕЗ гарда, и повторное залипание после возврата гарда в §gate-v3.
+		// §gen-fix THE ROOT BUG (there since §reuse itself): `arr[i] = v` in sclang returns THE
+		// ARRAY ITSELF, not the value (the same trap documented for dict[k]=v).
+		// Because of `myGen = (pool[\gen][idx] = …)` myGen was AN ARRAY, and the gen guard
+		// `pool[\gen][idx] == myGen` (number == array) was ALWAYS false → the gate-off was
+		// ALWAYS cut → gates piled up at 1 → sticking. That is where «hold always stuck» came
+		// from, and why reatk/legato came back to life exactly when the gate-off went out as a
+		// server bundle WITHOUT the guard, and stuck again when the guard returned in §gate-v3.
 		pool[\gen][idx] = pool[\gen][idx] + 1;
 		myGen = pool[\gen][idx];
 
@@ -1492,7 +1493,7 @@
 		holdCont = (artic == \hold) and: { stillOpen }
 			and: { cfg[\gateSrc].isNil } and: { (respawned ? false).not };
 
-		// маппинг живых арг → per-cell шины (top.use: внутри ~mbAt живут ~mb/~mbSm)
+		// map the live arguments → per-cell buses (top.use: ~mb/~mbSm live inside ~mbAt)
 		// §map-seed cell-boundary bus handoff: the NEXT cell's bus holds its
 		// base/stale value until the engine's next tick (~16 ms), so a remap
 		// TELEPORTED continuously-scrubbed params (tape grPos burst-played the
@@ -1537,15 +1538,15 @@
 				};
 			};
 		};
-		// pitched-синты: как дефолтное событие — \freq получает ~detunedFreq (freq+detune;
-		// §h-latch гармония кладёт сюда ЗАЩЁЛКНУТОЕ на онсете число); фолбэк — ~freq.
-		// §h-latch v2: продолжение hold-пробега питч НЕ трогает (см. holdCont выше).
+		// pitched synths: as in the default event — \freq gets ~detunedFreq (freq+detune; §h-latch
+		// harmony puts the number LATCHED at the onset here); the fallback is ~freq.
+		// §h-latch v2: continuing a hold run does NOT touch the pitch (see holdCont above).
 		if (ctrl.includes(\freq) and: { holdCont.not }) {
 			var fr = ev.use { try { (~detunedFreq).value } { nil } };
 			if (fr.isNumber.not) { fr = ev.use { try { (~freq).value } { nil } } };
 			if (fr.isNumber) { top[\f2VSet].(voice, [\freq, fr]) };
 		};
-		// статические числовые контролы (не reserved, не в f2map) → set
+		// static numeric controls (not reserved, not in f2map) → set
 		setA = [];
 		ev.keysValuesDo { |k, v|
 			if (reserved.includes(k).not and: { v.isNumber } and: { ctrl.includes(k) }
@@ -1570,45 +1571,46 @@
 		} {
 			if (cfg[\cellTrig] == 1) { top[\f2VSet].(voice, [\t_trig, 1]) };
 		};
-		// АРТИКУЛЯЦИЯ — все три режима: gate=1 + ОТЛОЖЕННЫЙ гейт-офф с gen-guard. Соседняя ячейка
-		// ТОГО ЖЕ голоса бампает gen; её гейт-офф отменяет прошлый (перекрытия не режутся). Режим —
-		// это ТОЛЬКО момент гейт-оффа относительно границы ячейки (dur):
-		//   reattack — гейт-офф ДО онсета след. (зазор dur·0.85): на след. ячейке gate 0→1 = чёткая
-		//              РЕ-АТАКА с воздухом (перкуссивно/стаккато).
-		//   legato   — гейт-офф ЧУТЬ РАНЬШЕ границы (dur−ε, ε мал): огибающая ре-триггерится каждую
-		//              ячейку, но БЕЗ слышимой тишины (связно) — sus-синты не залипают.
-		//   hold     — гейт-офф ЧУТЬ ПОЗЖЕ границы (dur+ε): соседняя ячейка ТОГО ЖЕ синта приходит
-		//              на границе (раньше) и отменяет его → один СРОСШИЙСЯ гейт через весь пробег
-		//              смежных ячеек одного синта (gate ×N); релиз только на паузе \x или на границе
-		//              с ДРУГИМ синтом (там этот голос новых нот не получает → отменять некому).
-		//   Модуляции: preset-scope тянется непрерывно (окно скоупа не рвётся), cell-scope
-		//   сбрасывается пере-маппингом голоса на шину новой ячейки (выше) — «cell scope — исключение».
-		// §synth-mod КАНАЛЬНЫЙ гейт (cfg[\gateSrc] = SC-ключ шины): \gate голоса
-		// замаплен на шину — открытие/закрытие пишет ядро (контракт: источник
-		// исчез → ядро шлёт 0, гейт закрыт). События клеток тогда НЕ трогают
-		// gate/sched — они возят параметры/питч и держат окна модуляций.
+		// ARTICULATION — all three modes: gate=1 plus a DEFERRED gate-off with a gen guard. An
+		// adjacent cell of THE SAME voice bumps gen; its gate-off cancels the previous one (overlaps
+		// are not cut). The mode is ONLY the moment of the gate-off relative to the cell boundary (dur):
+		//   reattack — gate-off BEFORE the next onset (a gap of dur·0.85): on the next cell gate 0→1
+		//              is a clean RE-ATTACK with air around it (percussive, staccato).
+		//   legato   — gate-off JUST BEFORE the boundary (dur−ε, ε small): the envelope retriggers
+		//              every cell but WITHOUT audible silence (joined up) — sus synths do not stick.
+		//   hold     — gate-off JUST AFTER the boundary (dur+ε): the adjacent cell of THE SAME synth
+		//              arrives at the boundary (earlier) and cancels it → one MERGED gate across the
+		//              whole run of adjacent cells of one synth (gate ×N); the release comes only at a
+		//              rest \x or at a boundary with a DIFFERENT synth (this voice gets no new notes
+		//              there, so there is nobody to cancel). Modulation: preset scope runs on
+		//   continuously (the scope's window does not break), cell scope is reset by remapping the
+		//   voice onto the new cell's bus (above) — «cell scope is the exception».
+		// §synth-mod A CHANNEL gate (cfg[\gateSrc] = an SC bus key): the voice's \gate is mapped onto
+		// a bus — the core writes the opening and closing (the contract: if the source disappears the
+		// core sends 0 and the gate is shut). Cell events then do NOT touch gate or sched — they
+		// carry parameters and pitch and hold the modulation windows open.
 		if (cfg[\gateSrc].notNil) {
 			top.use {
 				var gb = ~mbAt.(cfg[\gateSrc]);
 				if (gb.notNil) { top[\f2VMap].(voice, \gate, gb.index) };
 			};
 		} {
-			// §gate-v3 ЖИЗНЕННЫЙ ЦИКЛ ГЕЙТА, устойчивый к ПЕРЕКРЫТИЯМ (полифония, параллельные
-			// ряды одного пресета, плотные сетки). Три болезни прежних версий:
-			//   1) совпавший онсет на ОТКРЫТЫЙ голос: set(gate,1) при gate=1 — НЕТ ФРОНТА,
-			//      EnvGen не ретриггерит → нота «пропадает в никуда»;
-			//   2) застрявший на 1 гейт (потерянный офф): перкуссионная огибающая (sus 0)
-			//      затихла, все дальнейшие 1→1 немы → голос МЁРТВ, «каждый кратный триггер
-			//      пропадает» (раунд-робин отдаёт ему каждую nv-ю ноту);
-			//   3) слепой (без gen-гарда) серверный офф: сталый офф соседней ячейки убивал
-			//      свежую ноту ТОГО ЖЕ голоса при перекрытии.
-			// Решение: язык ПЛАНИРУЕТ офф (двое часов, TempoClock+SystemClock) с gen-гардом
-			// (бамп gen на онсете отменяет сталые оффы; двойной сброс идемпотентен), доставка —
-			// серверным бандлом БЕЗ isPlaying (ложный false глотал офф — прежнее залипание).
-			// Онсет: если по бухгалтерии offAt голос ЕЩЁ ОТКРЫТ — микро-дип (gate 0 сейчас,
-			// gate 1 бандлом через 4 мс) вместо немого 1→1; иначе обычный set. Самоисцеление:
-			// даже при ошибочной бухгалтерии оффы этого цикла закроют гейт к концу ячейки —
-			// следующий онсет получит фронт.
+			// §gate-v3 A GATE LIFECYCLE that survives OVERLAPS (polyphony, parallel rows of one
+			// preset, dense grids). Three diseases of the earlier versions:
+			//   1) a coincident onset on an OPEN voice: set(gate,1) while gate=1 — NO EDGE, EnvGen
+			//      does not retrigger → the note «vanishes into nothing»;
+			//   2) a gate stuck at 1 (a lost off): a percussive envelope (sus 0) has died away, every
+			//      further 1→1 is mute → the voice is DEAD, «every nth trigger disappears» (round
+			//      robin hands it every nv-th note);
+			//   3) a blind (no gen guard) server-side off: a stale off from the adjacent cell killed
+			//      a fresh note on THE SAME voice under overlap.
+			// The fix: the language SCHEDULES the off (two clocks, TempoClock+SystemClock) with a gen
+			// guard (bumping gen at the onset cancels stale offs; a double reset is idempotent), and
+			// delivery is a server bundle WITHOUT isPlaying (a false false swallowed the off — the old
+			// sticking). At the onset: if by the offAt bookkeeping the voice is STILL OPEN, a micro-dip
+			// (gate 0 now, gate 1 by bundle in 4 ms) instead of a mute 1→1; otherwise a plain set.
+			// Self-healing: even with wrong bookkeeping this cycle's offs close the gate by the end of
+			// the cell — the next onset gets its edge.
 			// offAtA/nowT/stillOpen live in the outer scope now (§h-latch v2 needs
 			// the gate-front decision before the freq/set sections above).
 			var beatDur = TempoClock.default.beatDur;
@@ -1690,12 +1692,13 @@
 			~enrich.value(ev)
 		}, pattern);
 		"[f2] ~play.(\\%, dur:%, group:%)".format(key, dur, grp.nodeID).postln;
-		// §sync quant САМОГО Pdef-прокси (не только плеера): подмена source при РЕДЕПЛОЕ
-		// планируется по Pdef.quant, а не по аргументу .play. Дефолт (1 бит) свапал новый
-		// цикл на ЛЮБОМ бите → origin SC ≠ origin движка (frac(beat/dur)) → окна модуляции
-		// съезжали на (бит свапа mod dur) НАВСЕГДА: слышимая ячейка получала только базу
-		// (knob), модуляция составлялась для чужой. Свап строго на границе ПЕТЛИ строки —
-		// та же сетка, на которой движок вводит отложенную структуру (§smooth-restart).
+		// §sync quant OF THE Pdef PROXY ITSELF (not only the player): swapping the source on a
+		// REDEPLOY is scheduled by Pdef.quant, not by the .play argument. The default (1 beat)
+		// swapped the new cycle in on ANY beat → SC's origin ≠ the engine's origin (frac(beat/dur))
+		// → the modulation windows slid by (the swap beat mod dur) FOREVER: the audible cell got
+		// only the base (knob) while the modulation was composed for another one. The swap is
+		// strictly on the ROW's LOOP boundary — the same grid on which the engine introduces
+		// deferred structure (§smooth-restart).
 		Pdef(key).quant_(quant);
 		Pdef(key, final).play(TempoClock.default,
 			(group: grp, addAction: \addToHead), quant);
@@ -1825,9 +1828,10 @@
 			};
 		}.value;
 
-		// §reuse: постоянный голос вместо спавна-на-ноту. Условия: тумблер вкл, не rest, есть
-		//   cfg пресета (res[\f2def] из дефа), синтдеф гейтовый, и это НЕ гармонический голос
-		//   (detunedFreq → voice-шина, иной путь). \f2voice берёт голос из пула (см. addEventType).
+		// §reuse: a persistent voice instead of a spawn per note. Conditions: the toggle is on, this
+		//   is not a rest, the preset has a cfg (res[\f2def] from the def), the synthdef is gated, and
+		//   this is NOT a harmonic voice (detunedFreq → a voice bus, a different path). \f2voice takes
+		//   a voice from the pool (see addEventType).
 		// §cards-orphan a COMPOSITE preset (instrument \chain / \stack) has no
 		//   SynthDef of its own, so \f2voice is its ONLY spawn path — it takes
 		//   that road whatever the ~f2Reuse toggle says and whatever the cfg
@@ -1848,15 +1852,15 @@
 			and: { res[\f2def].notNil }) {
 			var rcfg = (globalEnv.at(\f2ReuseCfg) ? IdentityDictionary.new)[res[\f2def]];
 			var rsd = SynthDescLib.global.at(res[\instrument]);
-			// §artic ЛЮБОЙ гейтовый синт идёт через \f2voice — иначе артикуляция
-			//   reatk/legato/hold и пул голосов вообще не действуют (прежний гард
-			//   требовал ещё и \i_free, и ВСЕ проектные синты без него играли
-			//   спавном — «режимы не различаются»). Синт БЕЗ \i_free
-			//   самоосвобождается по релизу: пул это видит (isPlaying) и пересоздаёт
-			//   голос — для reatk/legato это эквивалент спавна, зато hold СРАЩИВАЕТ
-			//   пробег смежных ячеек (гейт внутри пробега не падает — синт жив).
-			//   Гармонические пресеты (detunedFreq) больше не исключаются: частота
-			//   защёлкнута числом на онсете (§h-latch), голосу reuse не мешает.
+			// §artic EVERY gated synth goes through \f2voice — otherwise the reatk/legato/hold
+			//   articulation and the voice pool do not work at all (the old guard also demanded
+			//   \i_free, and EVERY project synth without it played by spawning — «the modes make no
+			//   difference»). A synth WITHOUT \i_free frees itself on release: the pool sees that
+			//   (isPlaying) and recreates the voice — for reatk and legato that is equivalent to
+			//   spawning, while hold MERGES a run of adjacent cells (the gate does not fall inside
+			//   the run — the synth is alive). Harmonic presets (detunedFreq) are no longer excluded:
+			//   the frequency is latched as a number at the onset (§h-latch), so reuse does not get in
+			//   the voice's way.
 			// §stack a composite preset has no SynthDef of its own (instrument
 			// \stack): its cfg carries the sub-unit list and \f2voice spawns the
 			// group — reuse-eligible by construction. §cards strips (instrument
@@ -3176,7 +3180,7 @@
 	~loadFolder = { |subDir, type|
 		var p = rootPath +/+ subDir;
 		"> Loading % from: %".format(subDir, p).postln;
-		// §fx-guard молчаливый скип каталога прятал пустой fx-репо (глухие шины) — кричим
+		// §fx-guard skipping the catalogue silently hid an empty fx repo (dead buses) — so it shouts
 		if (File.exists(p).not) { "✗ ~loadFolder: % NOT FOUND — skipped (bad root?)".format(p).postln };
 		if (File.exists(p)) {
 			PathName(p).entries.do { |f|
@@ -3406,13 +3410,12 @@
 		// symbols as strings. Empty objects until f2units has loaded.
 		ctx[\unitOpts] = topEnvironment[\f2UnitOpts] ? ();
 		ctx[\unitSpecs] = topEnvironment[\f2UnitSpecs] ? ();
-		// 5c. §cut юниты, ВЫРЕЗАННЫЕ из движка (~f2UnitsCut, units v49: amU / envcaU /
-		// onsetU) → на что пересобирать карточку. Это НЕ legacy: legacy-юнит остаётся в
-		// библиотеке, доезжает до SynthDesc и просто спрятан из меню; вырезанного нет
-		// нигде, поэтому карточка старого сейва не находит ни одного контрола и рисуется
-		// ПУСТОЙ — выглядит как байпас, а звучать не будет никогда. Движок печатает
-		// ~f2UnitGoneMsg в пост-окно, но музыкант смотрит не туда: с этой строкой ту же
-		// фразу говорит сама карточка.
+		// 5c. §cut units CUT OUT of the engine (~f2UnitsCut, units v49: amU / envcaU / onsetU) → what
+		// to rebuild the card as. This is NOT legacy: a legacy unit stays in the library, reaches
+		// SynthDesc and is merely hidden from the menu; a cut one is nowhere at all, so an old save's
+		// card finds not one control and is drawn EMPTY — it looks like a bypass and will never make
+		// a sound. The engine prints ~f2UnitGoneMsg to the post window, but a musician is not looking
+		// there: with this line the card says the same thing itself.
 		ctx[\unitsCut] = topEnvironment[\f2UnitsCut] ? ();
 
 		// 6. Defs detail — alias → { instrument, numeric + symbol params }
@@ -3516,7 +3519,7 @@
 		knownSpecs[\time] = (min:0.01, max:4, warp:"exp");
 		knownSpecs[\damp] = (min:0, max:1, warp:"lin");
 		knownSpecs[\depth] = (min:0, max:1, warp:"lin");
-		// §loop-cond кондиционер порт-входов юнитов (f2units): газ/демпфер/насыщение петли
+		// §loop-cond the conditioner on unit port inputs (f2units): loop gain / damping / saturation
 		knownSpecs[\inGain] = (min:0, max:2, warp:"lin");
 		knownSpecs[\inDamp] = (min:0, max:1, warp:"lin");
 		knownSpecs[\inSat] = (min:0, max:1, warp:"lin");
@@ -3572,7 +3575,7 @@
 		knownSpecs[\nGrain] = (min:1, max:16, warp:"lin");
 		knownSpecs[\scat] = (min:0.01, max:0.5, warp:"exp");
 		knownSpecs[\gDur] = (min:0.01, max:0.5, warp:"exp");
-		// §stut-look сдвиг окна захвата stutU назад в прошлое (сек)
+		// §stut-look slides stutU's capture window back into the past (seconds)
 		knownSpecs[\look] = (min:0, max:1.3, warp:"lin");
 		// §tape grainU: 0 = grains, 1 = grPos-as-read-head
 		knownSpecs[\mode] = (min:0, max:1, warp:"lin");
@@ -3593,7 +3596,7 @@
 		knownSpecs[\rq] = (min:0.05, max:1, warp:"lin");
 		knownSpecs[\vib] = (min:0, max:1, warp:"lin");
 		knownSpecs[\vibRate] = (min:0.5, max:16, warp:"exp");
-		// §unit-eq трёхполосный эквалайзер на выходе не-осцилляторных юнитов
+		// §unit-eq the three-band EQ on the output of non-oscillator units
 		knownSpecs[\eqLo] = (min:0, max:4, warp:"lin");
 		knownSpecs[\eqMid] = (min:0, max:4, warp:"lin");
 		knownSpecs[\eqHi] = (min:0, max:4, warp:"lin");
@@ -4120,6 +4123,6 @@
 	"> GROW phrase engine ready (% forms).".format(~form.size).postln;
 
 	"> F2DSL v2 ready.".postln;
-	// §provenance штамп сборки движка — мгновенная проверка «то ли загрузилось»
+	// §provenance the engine's build stamp — an instant check that the right thing loaded
 	"> F2DSL build: gate-v3 + loop-order-v3 + units-21 + cfg-sig + fx-base".postln;
 };

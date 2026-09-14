@@ -1,80 +1,79 @@
-# §synth-mod · Встроенные модульные синт-юниты — концепт v1
+# §synth-mod · The built-in modular synth units — concept v1
 
-> **Статус (units v49, 2026-09).** Это ДАТИРОВАННЫЙ концепт-документ первой волны юнитов;
-> живой контракт карточек — `docs/design/CARDS.md`. Три юнита, которые здесь описаны,
-> с тех пор ВЫРЕЗАНЫ из `sc/f2units.scd`: `amU` (преемник — `vocU`, та же пара
-> носитель × модулятор), `envcaU` (прямого преемника нет; ближайшее честное переписывание —
-> `tranU` на том же источнике) и `onsetU` (`scatU`: `trigIn` + `threshold` закрывают звуковую
-> половину, но onsetU был единственным юнитом, публиковавшим ТРИГГЕР в `/f2_chan`, и эта
-> телеметрия не перенесена). Примеры ниже оставлены как есть: они описывают, чем эти юниты
-> БЫЛИ, и читать их надо так. Реестр преемников — `~f2UnitsCut`.
+> **Status (units v49, 2026-09).** This is a DATED concept document for the first wave of
+> units; the live card contract is `docs/design/CARDS.md`. Three of the units described here
+> have since been CUT from `sc/f2units.scd`: `amU` (succeeded by `vocU`, the same carrier ×
+> modulator pair), `envcaU` (no direct successor; the closest honest rewrite is `tranU` on the
+> same source) and `onsetU` (`scatU`'s `trigIn` + `threshold` cover the audible half, but
+> onsetU was the only unit that published a TRIGGER on `/f2_chan`, and that telemetry has not
+> been carried over). The examples below are left as they were: they describe what those units
+> WERE, and should be read that way. The register of successors is `~f2UnitsCut`.
 
-Дата: 2026-08. Решения зафиксированы с пользователем:
-**MVP — межпресетные порты** (модуль = пресет со спец-юнитом, связи — шины),
-**полифония — клон графа на голос** (порт-шины со слотами по голосам),
-**первая волна — все четыре семейства** (FM/AM/PM, granular+stutter,
-chaos+stochastic, env/VCA).
+Date: 2026-08. The decisions were settled with the owner:
+**the MVP is cross-preset ports** (a module is a preset with a special unit, the links are
+buses), **polyphony is one clone of the graph per voice** (port buses with per-voice slots),
+**the first wave is all four families** (FM/AM/PM, granular+stutter, chaos+stochastic,
+env/VCA).
 
 ---
 
-## 0. Ответ на главный вопрос
+## 0. The answer to the main question
 
-**Да — на sclang это пишется, и почти вся тяжёлая механика уже работает в F2.**
-Концепт не строит новый движок — он обобщает существующие механизмы:
+**Yes — this is writable in sclang, and almost all of the heavy machinery already runs in F2.**
+The concept does not build a new engine; it generalises what is already there:
 
-| Уже есть (проверено в бою) | Роль в модулях |
+| Already present (proven in use) | Its role in modules |
 |---|---|
-| `\f2voice`: пул голосов, `gate` 0/1 c gen-guard + isPlaying-гард, `i_free=0` | жизненный цикл голоса модуля, незалипание |
-| hold/legato/reatk считаются в Go; hold = физически один длинный гейт | нативные артикуляции модулей «бесплатно» |
-| `~mbAt`: арги голоса маппятся на per-cell шины (база без гонки рождения) | все параметры модуля модулируемы из коробки |
-| канальный тракт `/f2_setb` + `/f2_frame` c NaN-гардами | kr-входы модулей = обычные каналы f2 |
-| `outBuses → ~rack.bus` (аудио пресета в именованные шины) | прототип audio-портов |
-| win-каналы скоупов + win-tail + пресетный ~win-онсет-клок | дефолтный гейт/триггер модуля |
-| eval-тракт (файловый фоллбэк, очередь), HushAll, CmdPeriod | деплой юнитов и аварийная зачистка |
+| `\f2voice`: the voice pool, `gate` 0/1 with a gen guard + an isPlaying guard, `i_free=0` | the lifecycle of a module's voice, and not sticking |
+| hold/legato/reatk are computed in Go; hold is physically one long gate | native module articulations «for free» |
+| `~mbAt`: a voice's arguments are mapped onto per-cell buses (a base with no birth race) | every module parameter is modulatable out of the box |
+| the channel path `/f2_setb` + `/f2_frame` with NaN guards | a module's kr inputs are ordinary f2 channels |
+| `outBuses → ~rack.bus` (a preset's audio into named buses) | the prototype of audio ports |
+| the scopes' win channels + win-tail + the preset `~win` onset clock | a module's default gate/trigger |
+| the eval path (file fallback, queue), HushAll, CmdPeriod | deploying units and clearing up after a crash |
 
-Новых механизма четыре: **конвенция юнита**, **порты** (мультислотные шины с
-голосовой индексацией), **гейт-как-канал** (переназначаемый источник гейта),
-**телеметрия SC→core** (`/f2_chan`) — выходы модулей становятся каналами.
+There are four new mechanisms: **the unit convention**, **ports** (multi-slot buses indexed by
+voice), **gate-as-a-channel** (a reassignable gate source) and **SC→core telemetry**
+(`/f2_chan`) — which turns a module's outputs into channels.
 
 ---
 
-## 1. Модель
+## 1. The model
 
-- **Юнит** — SynthDef со стандартным интерфейсом (см. §2): `fmOscU`, `amU`,
-  `grainU`, `stutU`, `chaosU`, `stochU`, `envcaU`, `chipU`…
-- **Модуль** — обычный пресет, у которого `instrument` = юнит. Это ключ:
-  модуль автоматически получает клетки на дереве, density, voices/artic,
-  win/win-tail, mods всех скоупов, палитру, harmony-питч — **«составляющие
-  синтезатора разбросаны во времени» работают в день один**, потому что
-  распределение по дереву — это и есть жизнь пресета.
-- **Порт** — именованная связь модулей: **audio-порт** (Bus.audio, слоты по
-  голосам, §4) или **kr-порт** (существующий канал: `bus:name` / `@mod` /
-  `sc:*` из телеметрии).
-- **Синт** — констелляция модулей, связанных портами. Топология постоянна
-  (граф в SC), **активация** частей — секвенсирована и вероятностна (дерево).
+- **A unit** is a SynthDef with a standard interface (see §2): `fmOscU`, `amU`, `grainU`,
+  `stutU`, `chaosU`, `stochU`, `envcaU`, `chipU`…
+- **A module** is an ordinary preset whose `instrument` is a unit. That is the key: a module
+  automatically gets cells on the tree, density, voices/artic, win/win-tail, mods in every
+  scope, the palette and harmony pitch — **«the parts of a synthesiser scattered through
+  time» work on day one**, because being distributed across the tree is simply what a
+  preset's life is.
+- **A port** is a named link between modules: an **audio port** (Bus.audio, slots per voice,
+  §4) or a **kr port** (an existing channel: `bus:name` / `@mod` / `sc:*` from telemetry).
+- **A synth** is a constellation of modules linked by ports. The topology is fixed (a graph in
+  SC); **activation** of its parts is sequenced and probabilistic (the tree).
 
-## 2. Конвенция юнита (sclang)
+## 2. The unit convention (sclang)
 
-Обязательные контролы: `\out, \gate, \t_trig, \amp, \i_free` (=0),
-env-семейство `\atk \dec \sus \rel \curve`; тональные — `\freq`
-(+`detunedFreq`-латч гармонии уже работает). Порты — арги-индексы шин:
-`\inA, \inB, \portOut` (аудио), прочие параметры — обычные модулируемые арги
-(`~mbAt` подхватит их per-cell шинами автоматически).
+Required controls: `\out, \gate, \t_trig, \amp, \i_free` (=0) and the env family
+`\atk \dec \sus \rel \curve`; tonal units also take `\freq` (the harmony `detunedFreq` latch
+already works). Ports are bus-index arguments: `\inA, \inB, \portOut` (audio); every other
+parameter is an ordinary modulatable argument (`~mbAt` picks them up with per-cell buses
+automatically).
 
-Правила юнита:
-1. гейтовый юнит проходит через `\f2voice` (уже так для любого synthdef с
-   `\gate`) — артикуляции и пул достаются даром;
-2. `EnvGen.kr(Env.adsr(...), gate, doneAction: 0)` при `i_free=0`;
-   ре-атака — `t_trig`-вход: `EnvGen(..., gate + Trig.kr(t_trig, 0.001))`;
-3. выход в порт — только через `LeakDC → Sanitize` (порт не может занести
-   NaN соседям — тот же контракт, что у рэка);
-4. телеметрия опциональна: `SendReply.kr(Impulse.kr(30), '/f2_chan', [sig], id)`;
-5. никаких `doneAction: 2` в теле — освобождение только через пул/HushAll.
+The rules for a unit:
+1. a gated unit goes through `\f2voice` (which is already the case for any synthdef with a
+   `\gate`) — the articulations and the pool come free;
+2. `EnvGen.kr(Env.adsr(...), gate, doneAction: 0)` with `i_free=0`; re-attack is the `t_trig`
+   input: `EnvGen(..., gate + Trig.kr(t_trig, 0.001))`;
+3. output into a port goes only through `LeakDC → Sanitize` (a port must not carry a NaN to
+   its neighbours — the same contract as the rack's);
+4. telemetry is optional: `SendReply.kr(Impulse.kr(30), '/f2_chan', [sig], id)`;
+5. no `doneAction: 2` in the body — freeing happens only through the pool or HushAll.
 
-Скетчи (доказательство выразимости, не финальный код):
+Sketches (a proof that this is expressible, not final code):
 
 ```supercollider
-// FM-осциллятор: тональный источник с audio-FM входом (порт inA)
+// FM oscillator: a tonal source with an audio-rate FM input (the inA port)
 SynthDef(\fmOscU, { |out=0, gate=0, t_trig=0, amp=0.2, i_free=0,
     freq=220, fmIn=(-1), fmDepth=0, ratio=1, atk=0.01, dec=0.1, sus=0.8, rel=0.4|
   var g   = gate + Trig.kr(t_trig, 0.001);
@@ -84,7 +83,7 @@ SynthDef(\fmOscU, { |out=0, gate=0, t_trig=0, amp=0.2, i_free=0,
   Out.ar(out, (sig ! 2));
 }).add;
 
-// AM/ring-процессор: вход × (1 + depth·mod), mod — из порта или kr-канала
+// AM / ring processor: input × (1 + depth·mod), with mod from a port or a kr channel
 SynthDef(\amU, { |out=0, gate=0, amp=1, i_free=0, inA=(-1), modIn=(-1),
     depth=1, ring=0, atk=0.005, rel=0.2|
   var env = EnvGen.kr(Env.asr(atk, 1, rel), gate, doneAction: 0);
@@ -94,7 +93,7 @@ SynthDef(\amU, { |out=0, gate=0, amp=1, i_free=0, inA=(-1), modIn=(-1),
   Out.ar(out, car * am * amp * env);
 }).add;
 
-// stutter: кольцевой буфер входа, переигрывание слайсов по гейту/тригу
+// stutter: a ring buffer of the input, replaying slices on the gate or the trigger
 SynthDef(\stutU, { |out=0, gate=0, t_trig=0, amp=1, i_free=0, inA=(-1),
     slice=0.125, pitch=1, chance=1|
   var buf  = LocalBuf(48000 * 2, 2).clear;
@@ -106,279 +105,271 @@ SynthDef(\stutU, { |out=0, gate=0, t_trig=0, amp=1, i_free=0, inA=(-1),
   Out.ar(out, XFade2.ar(inp, sig, (gate * 2) - 1) * amp);
 }).add;
 
-// chaos: lorenz как kr-модулятор + телеметрия в каналы f2
+// chaos: lorenz as a kr modulator, plus telemetry into f2's channels
 SynthDef(\chaosU, { |out=0, gate=0, amp=1, i_free=0, rate=8, telId=0|
   var sig = LorenzL.ar(SampleRate.ir / 20).lag(1/rate);
   SendReply.kr(Impulse.kr(30) * gate, '/f2_chan', [sig.range(0,1)], telId);
-  Out.ar(out, (sig * amp * gate) ! 2);   // и аудио, если воткнут в порт
+  Out.ar(out, (sig * amp * gate) ! 2);   // and audio too, if it is patched into a port
 }).add;
 
-// stochastic: вероятностный гейт-генератор — его ВЫХОД может быть чужим гейтом
+// stochastic: a probabilistic gate generator — its OUTPUT can be someone else's gate
 SynthDef(\stochU, { |out=0, gate=0, i_free=0, dens=4, prob=0.7, telId=0|
   var trig = Dust.kr(dens * gate) * (TRand.kr(0, 1, Dust.kr(dens)) < prob);
   var g    = Trig.kr(trig, 0.08);
   SendReply.kr(Impulse.kr(60), '/f2_chan', [g], telId);
-  Out.kr(out, g);   // kr-порт: гейт-шина для других модулей
+  Out.kr(out, g);   // a kr port: a gate bus for other modules
 }).add;
 ```
 
-## 3. Гейт как канал (переназначаемый)
+## 3. The gate as a channel (reassignable)
 
-У модуля-пресета новое поле `gateSrc`:
+A module-preset has a new field, `gateSrc`:
 
-- **`win` (дефолт)** — как сейчас: гейт ставят события клеток через
-  `\f2voice`. Ничего не меняется, артикуляции уже работают.
-- **канал** (`bus:name`, `@mod`, `m:k`, `sc:stoch1`…) — голоса модуля
-  живут постоянно (пул уже умеет `i_free=0`), а `\gate` **маппится на
-  контрол-шину канала** (`.asMap` от ScKey-шины — тот же приём, что
-  `~mbAt` для параметров). Клетки модуля тогда задают только окна модуляции
-  и параметры; триггер приходит из канала — например, из `stochU` другого
-  модуля. Это буквально «гейт можно перенастроить на другую шину».
+- **`win` (the default)** — as it is today: the gate is set by cell events through `\f2voice`.
+  Nothing changes and the articulations already work.
+- **a channel** (`bus:name`, `@mod`, `m:k`, `sc:stoch1`…) — the module's voices live
+  permanently (the pool already handles `i_free=0`) and `\gate` is **mapped onto the
+  channel's control bus** (`.asMap` from the ScKey bus — the same trick `~mbAt` uses for
+  parameters). The module's cells then set only the modulation windows and the parameters;
+  the trigger arrives from the channel — from another module's `stochU`, say. This is
+  literally «the gate can be repointed at another bus».
 
-Онсеты — отдельным `trig`-каналом: core уже умеет онсет-клок (`~win` с
-depth −1 / off +1); для модулей заводится явный `gate`/`trig`-канал скоупа,
-и **семантика артикуляций из Go применяется к записи каналов**:
+Onsets travel on a separate `trig` channel: the core already has an onset clock (`~win` with
+depth −1 / off +1); modules get an explicit `gate`/`trig` channel per scope, and **the
+articulation semantics from Go apply to what is written to the channels**:
 
-| artic | gate-канал | trig-канал |
+| artic | the gate channel | the trig channel |
 |---|---|---|
-| reattack | 1 на клетке, 0 в зазоре (dur·0.85 — как сейчас) | импульс на каждом онсете |
-| legato | держится 1 через смежные клетки | без импульсов |
-| hold | физически один длинный 1 через смежные клетки одного пресета (логика §artic уже есть) | импульс только на первом онсете |
+| reattack | 1 on the cell, 0 in the gap (dur·0.85, as it is today) | an impulse on every onset |
+| legato | held at 1 across adjacent cells | no impulses |
+| hold | physically one long 1 across adjacent cells of one preset (the §artic logic already exists) | an impulse on the first onset only |
 
-win-tail продлевает гейт-канал так же, как окно модуляции.
+win-tail extends the gate channel exactly as it extends a modulation window.
 
-### Контракт незалипания (4 + 1 уровней)
+### The non-sticking contract (4 + 1 levels)
 
-1. **Явный ноль**: писатель гейт-канала обязан записать 0 перед закрытием/
-   удалением канала (движковое правило: `store.Delete(gate-канал)` ⇒
-   предзапись 0 в SC-шину — расширение текущего diff-протокола);
-2. **gen-guard + isPlaying** на голосах — уже есть, не трогаем;
-3. **HushAll / CmdPeriod** рубят пул и Ndef'ы — уже есть; юниты обязаны
-   быть в группах, которые HushAll čистит;
-4. **NaN-гарды** тракта — уже есть (`/f2_setb`, `/f2_frame`); порты
-   прикрыты Sanitize на каждом выходе юнита;
-5. **Watchdog (страховка)**: для канальных гейтов SC-сторона может гасить
-   гейт при потере heartbeat'а кадров (`Gate.kr` + таймаут по `/f2_frame`) —
-   включается флагом, дефолт выкл: явного нуля из (1) достаточно.
+1. **An explicit zero**: whoever writes a gate channel must write 0 before closing or deleting
+   it (an engine rule: `store.Delete(gate channel)` ⇒ a pre-write of 0 into the SC bus, an
+   extension of the current diff protocol);
+2. **the gen guard + isPlaying** on the voices — already there, untouched;
+3. **HushAll / CmdPeriod** cut down the pool and the Ndefs — already there; units must live in
+   groups that HushAll clears;
+4. **NaN guards** on the path — already there (`/f2_setb`, `/f2_frame`); ports are covered by
+   a Sanitize on every unit output;
+5. **A watchdog (insurance)**: for channel gates the SC side can drop the gate when the frame
+   heartbeat is lost (`Gate.kr` + a `/f2_frame` timeout) — switched on by a flag, off by
+   default: the explicit zero from (1) is enough.
 
-## 4. Порты и полифония (клон графа на голос)
+## 4. Ports and polyphony (one clone of the graph per voice)
 
-Выбор пользователя — настоящая полифония модульных констелляций:
+The owner's choice was real polyphony of modular constellations:
 
-- **audio-порт** = `Bus.audio(s, 2·V)`, V = максимум голосов (5). Слот k —
-  стереопара голоса k.
-- **Писатель**: голос с пуловым индексом k пишет в слот k (арг `\portOut` =
-  `bus.index + 2k` ставится при спавне голоса — пул знает k).
-- **Читатель**: голос k читает слот `k mod V_писателя` — детерминированное
-  спаривание carrier[k] ⇄ fmMod[k]; при неравном числе голосов — обход по
-  кругу. hold-прилипание (`hidx`) сохраняет пары стабильными во времени.
-- **kr-порты** v1 — общие на модуль (один канал), не пер-голос: честное
-  задокументированное ограничение (pер-голосовые kr-каналы — v2, если
-  понадобятся).
-- **Порядок исполнения**: юниты живут в подгруппах модульной группы,
-  топологически отсортированных по портам (писатели раньше читателей);
-  циклы разрешены через `InFeedback` (задержка блока) — в скетчах выше
-  входы уже InFeedback, то есть любой граф, включая циклический FM,
-  корректен без сортировки вовсе (плата — блок задержки в петле).
+- an **audio port** is `Bus.audio(s, 2·V)`, V = the maximum voice count (5). Slot k is voice
+  k's stereo pair.
+- **The writer**: the voice with pool index k writes into slot k (the `\portOut` argument =
+  `bus.index + 2k`, set when the voice is spawned — the pool knows k).
+- **The reader**: voice k reads slot `k mod V_writer` — a deterministic pairing of
+  carrier[k] ⇄ fmMod[k]; with unequal voice counts it wraps around. Hold sticking (`hidx`)
+  keeps the pairs stable over time.
+- **kr ports** in v1 are per module (one channel), not per voice: an honest, documented
+  limitation (per-voice kr channels are a v2 matter, if they are ever needed).
+- **Execution order**: units live in subgroups of the module group, topologically sorted by
+  their ports (writers before readers); cycles are legal through `InFeedback` (one block of
+  delay) — in the sketches above the inputs are already InFeedback, so any graph, cyclic FM
+  included, is correct with no sorting at all (the price being one block of delay in the loop).
 
-Бюджет шин: `модули × порты × V` — считаем при компиляции, шины
-переиспользуются между деплоями (реестр как у `~rack.bus`).
+The bus budget is `modules × ports × V` — counted at compile time, and buses are reused
+between deploys (a registry like `~rack.bus`).
 
-## 5. Телеметрия SC → core (`/f2_chan`)
+## 5. SC → core telemetry (`/f2_chan`)
 
-Обратное направление к `/f2_setb`: юнит шлёт `SendReply.kr → '/f2_chan'
-[telId, value]` (30–60 Гц, гейтится собственным гейтом). Bridge принимает,
-NaN-гардит, кладёт в store как канал **`sc:<имя>`** — и дальше это обычный
-канал: любой модулятор слушает выход chaos-модуля, env-кривую VCA, гейт
-stochU; ScopeBus его показывает; ModCard listen его патчит. Цикл замыкается:
-**модуль ⇄ модуляторная система в обе стороны.**
+The reverse direction of `/f2_setb`: a unit sends `SendReply.kr → '/f2_chan' [telId, value]`
+(30–60 Hz, gated by its own gate). The bridge receives it, NaN-guards it and puts it in the
+store as the channel **`sc:<name>`** — and from there it is an ordinary channel: any modulator
+can listen to a chaos module's output, a VCA's env curve, a stochU's gate; ScopeBus shows it;
+ModCard listen patches it. The circle closes: **a module ⇄ the modulation system, both ways.**
 
-Rate-limit и коалесценция на bridge (как у существующей телеметрии cid).
+Rate limiting and coalescing happen on the bridge (as they do for the existing cid telemetry).
 
-## 6. Распределённость по дереву — сценарии-цели
+## 6. Distribution across the tree — the target scenarios
 
-1. **FM-пэд с вероятностной яркостью**: carrier-модуль (hold, voices=3) в
-   основной ветке; fmOsc-модуль — в `rand`-ветке. FM-составляющая существует
-   только когда вероятностная ветка играет; fmDepth ведёт ramp пресет-скоупа.
-2. **Гранулярный ландшафт под стохастическим гейтом**: `grainU` с
-   `gateSrc=sc:stoch1`; `stochU` живёт в своих клетках, его dens ведёт макро;
-   grPos гранул слушает `sc:chaos1`.
-3. **Stutter там, где легли клетки**: `stutU` врезан портом в шину барабанов,
-   гейт = win собственных клеток — заикание случается по рисунку дерева.
-4. **Каскадные синты**: env-кривая `envcaU` модуля A (телеметрия) — канал
-   модуляции cutoff юнита B; выход B — audio-порт в AM-вход C. Три пресета,
-   три ритмических жизни, один инструмент.
+1. **An FM pad with probabilistic brightness**: the carrier module (hold, voices=3) on the
+   main branch; the fmOsc module in a `rand` branch. The FM component exists only while the
+   probabilistic branch plays; fmDepth is driven by a preset-scope ramp.
+2. **A granular landscape under a stochastic gate**: `grainU` with `gateSrc=sc:stoch1`;
+   `stochU` lives in its own cells and its dens is driven by a macro; the grains' grPos
+   listens to `sc:chaos1`.
+3. **Stutter wherever the cells fell**: `stutU` patched by a port into the drum bus, its gate
+   being the win of its own cells — the stuttering happens along the tree's pattern.
+4. **Cascaded synths**: the env curve of module A's `envcaU` (telemetry) is the modulation
+   channel for unit B's cutoff; B's output is an audio port into C's AM input. Three presets,
+   three rhythmic lives, one instrument.
 
-## 7. План по слоям
+## 7. The layers
 
-1. **sc/f2units.scd** (новый): 8 юнитов первой волны (fmOscU, amU/pmU,
-   grainU, stutU, chaosU, stochU, envcaU) + реестр портов + `/f2_chan`.
-2. **core**: gate/trig-каналы модулей в тике (переиспользуя артик-логику
-   окон), правило «ноль перед удалением», приём `/f2_chan` → `sc:*`-каналы;
-   session/compiler: поля модуля (`unit`, `gateSrc`, `ports`) + эмиссия
-   шин/маппингов при деплое.
-3. **UI**: у пресета секция «module»: юнит (Menu), gateSrc (Menu каналов —
-   тот же список, что listen), порты (Menu модулей-целей + Tag-сводка);
-   карточки/каналы уже готовы (ModCard, ScopeBus, listen).
-4. Порядок: **(а) ✅ реализован** — юниты+порты при `gateSrc=win` (звук и
-   распределение по дереву сразу): sc/f2units.scd (8 юнитов + ~f2Ports/
-   ~f2PortEnsure/~f2PortOutSlot/~f2PortInSlot, бут подключён), \f2voice
-   ставит слоты при спавне (mkVoice(vi), guard на старый бут), portOut/
-   portIns в ~f2ReuseCfg + ~f2PortEnsure-строки (TS+Go байт-в-байт,
-   структурные), UI-ряд PORTS в деталях пресета (out → порт; …In-арги ←
-   порты, Menu известных + ввод нового). **(б) ✅ реализован** — канальные
-   гейты: `Preset.gateSrc` (win-дефолт | `bus:<имя>` | `m:<k>` — грамматика v1,
-   контекстно-свободные каналы; paths.GateChan/ScKeyRaw зеркалены в TS),
-   компиляторы кладут SC-ключ в ту же cfg-строку (структурно), дирижёр
-   доставляет значение источника в SC-шину гейта каждый тик (исчез из стора/
-   NaN → 0; строка остановлена → дослать 0 и забыть; smooth всегда выключен —
-   фронты острые), `\f2voice` маппит `\gate` на шину и НЕ трогает set/sched
-   (события возят параметры/питч и держат окна), UI — «gate ← … ▾» в ряду
-   PORTS (Menu: win + bus:/m:-каналы из useModSources). Стохастическое
-   управление — func-модами (prob/euclid/dice/dust-подобные) через →bus.
-   **(в) ✅ реализован** — телеметрия `/f2_chan`: `Preset.telOut` (структурное)
-   даёт юниту replyID = FNV-1a(defKey)&int31 (compiler.TelID ≡ TS telId,
-   бит-точно); компиляторы кладут `telId:` в cfg-строку + реестр
-   `~f2TelMap[id] = "sc:<san>"`; юниты шлют SendReply(30 Гц при слышимом
-   env/gate; chaos 0..1-норм, stoch — Trig 60 Гц) ТОЛЬКО голосом 0 (\f2voice
-   передаёт telId лишь vi==0 — без флаттера канала); sclang-форвардер
-   OSCdef(\f2chanFwd) переводит replyID→имя и шлёт `/f2_chan [имя, знач]` в
-   ядро (topEnvironment[\f2CoreAddr]); мост → Conductor.OnScChan: только
-   namespace `sc:`, NaN/Inf-дроп, санизация имени; канал живёт в общем сторе
-   с TTL 0.5с (тик метёт замолчавших писателей, HushAll прибирает все) —
-   его слушает listen (`sc:*` в резолве селекторов Go+TS) и gateSrc
-   (модуль гейтует модуль); UI: тумблер «tel» в деталях пресета, sc:-каналы
-   в списке источников (useModSources) и в Menu гейта.
-   **(г) ✅ реализован** — UI-полировка и пресеты-примеры: ряд деталей пресета
-   стал секцией MODULE (порты + gate + tel в одном ряду); Menu In-слота
-   группирует «writers» — модули-цели с portOut (имя ← пресет, hint = voices);
-   Tag-сводка модульного графа под секцией (`порт ⌁ писатели·Nv → читатели.arg`,
-   `sc:* ⇒ модуль.gate`, бюджет §8 `Σ голосов · порты · каналы`); tel-кнопка
-   только у юнитов с контролом telId (честность UI). Демо-сейв
-   docs/project-template/Sessions/modular.json (билдер build_modular.py,
-   валидация modularSave.test.ts): 4 ряда = сценарии §6 — FMPAD (carrier hold
-   3v ← порт fm1 оператора из rand-ветки, fmDepth дышит ramp'ой пресета),
-   GRAIN (grainU gateSrc=sc:u_stoch, dens стохастика ← макро m:1, grPos ←
-   sc:u_chaos), STUT (мелодия ТОЛЬКО в порт mel → stutU по рисунку клеток),
-   CASC (bell portOut bel → venv srcIn+telOut → sc:u_venv ведёт pmDepth bell;
-   amU carIn←bel, modIn←fm1 — КРОСС-РЯДНАЯ констелляция). Все 8 юнитов,
-   10 модулей, оба конвейера проверены (эмиссия cfg/портов/телеметрии
-   байт-строками + v2-поток 4 рядов без NaN).
+1. **sc/f2units.scd**: the units of the first wave (fmOscU, amU/pmU, grainU, stutU, chaosU,
+   stochU, envcaU) plus the port registry and `/f2_chan`.
+2. **core**: module gate/trig channels in the tick (reusing the articulation logic of the
+   windows), the «zero before deletion» rule, receiving `/f2_chan` → `sc:*` channels;
+   session/compiler: the module's fields (`unit`, `gateSrc`, `ports`) and the emission of
+   buses and mappings on deploy.
+3. **UI**: a «module» section on the preset: the unit (a Menu), gateSrc (a Menu of channels —
+   the same list as listen), the ports (a Menu of target modules plus a Tag summary); the
+   cards and channels are already there (ModCard, ScopeBus, listen).
 
-## 8. Риски
+**Units and ports at `gateSrc=win`** are what give sound and distribution across the tree at
+once: sc/f2units.scd (the units plus ~f2Ports / ~f2PortEnsure / ~f2PortOutSlot /
+~f2PortInSlot, wired into the boot), `\f2voice` setting the slots at spawn (mkVoice(vi), with
+a guard for an older boot), portOut/portIns in `~f2ReuseCfg` plus the `~f2PortEnsure` lines
+(TS and Go byte for byte, structural), and the PORTS row in the preset's details (out → a
+port; the …In arguments ← ports, a Menu of the known ones plus free entry of a new one).
 
-- **Циклы портов**: InFeedback решает корректность, но добавляет блок
-  задержки — для FM-петель это слышимо-нормально, документируем.
-- **Бюджет нод/шин** при клоне на голос: V=5 × юниты × порты — считать при
-  деплое, показывать в rack-стиле теге (`n nodes · m buses`).
-- **kr-порты не пер-голос** (v1) — задокументированное упрощение.
-- **Гонка деплоя юнитов** — уже решённый класс проблем (eval-очередь,
-  файловый фоллбэк, ack-эпохи).
-- **Телеметрия-шторм** — rate-limit на юните (Impulse.kr) и на bridge.
+**Channel gates**: `Preset.gateSrc` (the win default | `bus:<name>` | `m:<k>` — the v1
+grammar, context-free channels; paths.GateChan/ScKeyRaw are mirrored in TS), the compilers put
+the SC key in the same cfg line (structurally), the conductor delivers the source's value into
+the SC gate bus every tick (gone from the store or NaN → 0; the row stopped → send a final 0
+and forget it; smooth is always off, so the edges stay sharp), `\f2voice` maps `\gate` onto
+the bus and does NOT touch set/sched (events carry parameters and pitch and hold the windows
+open), and the UI shows «gate ← … ▾» in the PORTS row (a Menu of win plus the bus:/m: channels
+from useModSources). Stochastic control comes from func mods (prob/euclid/dice/dust-like)
+through →bus.
+
+**`/f2_chan` telemetry**: `Preset.telOut` (structural) gives the unit a replyID of
+FNV-1a(defKey)&int31 (compiler.TelID ≡ the TS telId, bit for bit); the compilers put `telId:`
+in the cfg line plus the `~f2TelMap[id] = "sc:<san>"` registry; units send SendReply (30 Hz
+while the env or gate is audible; chaos normalised to 0..1, stoch a 60 Hz Trig) from VOICE 0
+ONLY (`\f2voice` passes telId only when vi==0 — no channel flutter); the sclang forwarder
+OSCdef(\f2chanFwd) turns the replyID into a name and sends `/f2_chan [name, value]` to the
+core (topEnvironment[\f2CoreAddr]); the bridge → Conductor.OnScChan: the `sc:` namespace only,
+NaN/Inf dropped, the name sanitised; the channel lives in the common store with a 0.5 s TTL
+(the tick sweeps writers that have gone quiet, HushAll takes them all) — and it is heard by
+listen (`sc:*` in the selector resolution in both Go and TS) and by gateSrc (a module gating a
+module). In the UI: a «tel» toggle in the preset's details, and the sc: channels in the source
+list (useModSources) and in the gate Menu.
+
+**The UI and the example presets**: the preset's details row became the MODULE section (ports,
+gate and tel in one row); the In-slot Menu groups the «writers» — target modules that have a
+portOut (the name ← the preset, the hint = voices); a Tag summary of the modular graph sits
+under the section (`port ⌁ writers·Nv → readers.arg`, `sc:* ⇒ module.gate`, the §8 budget
+`Σ voices · ports · channels`); the tel button appears only on units that have a telId control
+(an honest UI). The demo save is docs/project-template/Sessions/modular.json (built by
+build_modular.py, validated by modularSave.test.ts): 4 rows = the scenarios of §6 — FMPAD (a
+carrier held on 3 voices ← the fm1 port of an operator in a rand branch, fmDepth breathing on
+a preset ramp), GRAIN (grainU gateSrc=sc:u_stoch, the stochastic dens ← macro m:1, grPos ←
+sc:u_chaos), STUT (the melody goes ONLY into the mel port → stutU follows the cell pattern),
+CASC (bell portOut bel → venv srcIn+telOut → sc:u_venv drives bell's pmDepth; amU carIn←bel,
+modIn←fm1 — a CROSS-ROW constellation). All the units, 10 modules and both pipelines are
+covered (cfg/port/telemetry emission as byte strings, plus a v2 stream of 4 rows with no NaN).
+
+## 8. Risks
+
+- **Port cycles**: InFeedback makes them correct but adds a block of delay — for FM loops that
+  is audibly fine, and it is documented.
+- **The node and bus budget** with one clone per voice: V=5 × units × ports — count it at
+  deploy time and show it in a rack-style tag (`n nodes · m buses`).
+- **kr ports are not per-voice** (v1) — a documented simplification.
+- **A race on deploying units** — an already solved class of problem (the eval queue, the file
+  fallback, the ack epochs).
+- **A telemetry storm** — rate-limited on the unit (Impulse.kr) and on the bridge.
 
 ---
 
-*Следующий шаг по одобрении: этап (а) — f2units.scd + порты + модель в
-session/compiler, gateSrc=win. Всё уже стоит на проверенных механизмах;
-новых «источников залипания» концепт не создаёт — наоборот, формализует
-контракт закрытия гейтов.*
+## §loop: stable feedback recursion (a v2 addition)
 
-## §loop: стабильная фидбек-рекурсия (v2 дополнение)
+Two reasons why «the loop sounds different on every run», and what was done about them:
 
-Две причины «каждый запуск петля звучит по-разному» и их решения:
+1. **§loop-order** — `InFeedback` gives 0 or 1 block of delay per hop depending on node order,
+   and that order was set by the FIRST onsets (rand branches → a lottery). Voices now live in
+   subgroups per (row × preset), inserted by sorting on defKey: node order — and with it the
+   block delays of every loop — is reproducible every time.
+2. **§loop-cond** — every port input carries a conditioner `gain → OnePole(damp) → tanh(sat)`
+   (the knobs `inGain/inDamp/inSat`, one set per unit, transparent by default): *inGain* <1
+   damps the loop's regeneration (decay instead of an explosion), *inDamp* is a high-frequency
+   damper (the aliased screech of FM feedback), *inSat* is a soft amplitude ceiling. All three
+   are ordinary modulatable parameters (the ~mbAt buses): the regeneration can be conducted.
 
-1. **§loop-order** — `InFeedback` даёт 0 или 1 блок задержки на хоп в зависимости
-   от порядка нод, а порядок задавался ПЕРВЫМИ онсетами (rand-ветки → лотерея).
-   Теперь голоса живут в подгруппах на (строка×пресет), вставленных по сортировке
-   defKey: порядок нод — и блочные задержки всех петель — воспроизводимы всегда.
-2. **§loop-cond** — на каждом порт-входе кондиционер `gain → OnePole(damp) → tanh(sat)`
-   (ручки `inGain/inDamp/inSat`, по одному набору на юнит, дефолты прозрачны):
-   *inGain* <1 — регенерация петли (затухание вместо взрыва), *inDamp* — демпфер ВЧ
-   (алиасный визг FM-фидбека), *inSat* — мягкий потолок амплитуды. Все три —
-   обычные модулируемые параметры (шины ~mbAt): регенерацией можно дирижировать.
+## §glitch-units: the modal-percussive set
 
-## §glitch-units: модально-перкуссионный набор
-
-| юнит | тип | суть |
+| unit | type | what it is |
 |---|---|---|
-| `modalU` | источник/резонатор | банк 6 Ringz-мод; возбуждение: клик гейта + шум + порт `exIn`; `inharm/bright/decMul` |
-| `pluckU` | источник/резонатор | Karplus-Strong (`Pluck`, семпл-точная внутренняя рекурсия); бёрст + `exIn`; `fb/plDamp/burstFreq` |
-| `noiseU` | источник | перкуссивный резонансный шум со свипом высоты (`pEnv/pDec`), `res/crackle` |
-| `combU` | процессор | `CombC` по `srcIn` — гребёнка/металлический звон; `combFreq/fb/damp/mix` |
-| `foldU` | процессор | драйв → вейвфолд → sr/бит-краш по `srcIn`; `fDrive/foldAmt/crush/tone/mix` |
+| `modalU` | source / resonator | a bank of 6 Ringz modes; excitation: the gate's click + noise + the `exIn` port; `inharm/bright/decMul` |
+| `pluckU` | source / resonator | Karplus-Strong (`Pluck`, a sample-accurate internal recursion); a burst + `exIn`; `fb/plDamp/burstFreq` |
+| `noiseU` | source | percussive resonant noise with a pitch sweep (`pEnv/pDec`), `res/crackle` |
+| `combU` | processor | `CombC` over `srcIn` — a comb and metallic ring; `combFreq/fb/damp/mix` |
+| `foldU` | processor | drive → wavefold → sample-rate and bit crush over `srcIn`; `fDrive/foldAmt/crush/tone/mix` |
 
-`combU`/`pluckU` — «кирпичи» устойчивых петель: их рекурсия внутренняя (семпл-точная),
-в отличие от меж-модульных блочных петель портов. `exIn` — движковый порт-вход
-(в SKIP_PARAMS обоих компиляторов, как fmIn/srcIn).
+`combU` and `pluckU` are the «bricks» of steady loops: their recursion is internal
+(sample-accurate), unlike the cross-module block loops of the ports. `exIn` is an engine port
+input (in the SKIP_PARAMS of both compilers, like fmIn and srcIn).
 
-## §mod-suite / §pad-drum / §spec-suite (v2 расширение набора)
+## §mod-suite / §pad-drum / §spec-suite (a v2 extension of the set)
 
-| юнит | тип | суть |
+| unit | type | what it is |
 |---|---|---|
-| `shiftU` | процессор | сдвиг ВСЕХ частот на `shift` Гц (SSB, негармонично) + `fb`-рекурсия «парикмахерского шеста» |
-| `shimU` | процессор | грануло-питчшифт `pRatio` с рекурсией `fb` — шиммер-хвосты; `pDisp` — рассев |
-| `vocU` | процессор | огибающие `modIn` по 3 полосам ведут `carIn` — вокодер-фолловер; `sens/hard/vAtk/vRel` |
-| `subU` | источник | суб/кик: синус + питч-свип (`pEnv/pDec`) + `fDrive` + `click`; sus 0 = перкуссия |
-| `padU` | источник | 7 расстроенных пил + суб-октава; `dtn/wide/move/subAmt/tone` — комплексные пады |
-| `harmU` | источник | аддитив 12 парциалов: `nHarm/slope/odd/stretch/shimmer` — спектрально-точный |
-| `specU` | процессор | FFT: `smear`/`bShift`/`freeze`/`scomb`+`mix` — спектральная размазка/сдвиг/заморозка/гребёнка |
-| `tranU` | процессор | транзиент-шейпер: `trans`/`body`/`snap` — атаки отдельно от тела |
+| `shiftU` | processor | shifts EVERY frequency by `shift` Hz (SSB, inharmonic) plus the `fb` «barber pole» recursion |
+| `shimU` | processor | granular pitch shift `pRatio` with `fb` recursion — shimmer tails; `pDisp` scatters |
+| `vocU` | processor | the envelopes of `modIn` in 3 bands drive `carIn` — a vocoder follower; `sens/hard/vAtk/vRel` |
+| `subU` | source | sub/kick: a sine + a pitch sweep (`pEnv/pDec`) + `fDrive` + `click`; sus 0 = percussion |
+| `padU` | source | 7 detuned saws + a sub octave; `dtn/wide/move/subAmt/tone` — complex pads |
+| `harmU` | source | additive, 12 partials: `nHarm/slope/odd/stretch/shimmer` — spectrally precise |
+| `specU` | processor | FFT: `smear`/`bShift`/`freeze`/`scomb`+`mix` — spectral smear / shift / freeze / comb |
+| `tranU` | processor | transient shaper: `trans`/`body`/`snap` — attacks apart from bodies |
 
-`stutU` получил `mix`: 0 = ПРОЗРАЧНАЯ шина насквозь (dry не гейтится ADSR),
-1 = только продукт залипаний (гейтится как инструмент). Дефолт 1.
-Новые юниты переиспользуют существующие порт-входы (`srcIn`/`carIn`/`modIn`) —
-SKIP-списки компиляторов не расширялись, пересборка ядра не нужна.
+`stutU` gained a `mix`: 0 = the bus passes THROUGH transparently (the dry is not gated by the
+ADSR), 1 = the stutter product only (gated like an instrument). The default is 1. The new
+units reuse the existing port inputs (`srcIn`/`carIn`/`modIn`) — the compilers' SKIP lists were
+not extended and the core does not need rebuilding.
 
-## §port-sum: полная сумма порта, независимая от порядка нод (v3)
+## §port-sum: a port's full sum, independent of node order (v3)
 
-Семантика шин scsynth (первая запись цикла перезаписывает; InFeedback видит
-частичную сумму на своей позиции) делала многописательные порты лотереей порядка
-нод: читатель слышал только писателей РАНЬШЕ себя в дереве. Теперь порт двойной:
-писатели → W-шина; `\f2portCommit` (хвост дерева) переносит ПОЛНУЮ сумму цикла
-W→R; читатели читают R — всегда вся сумма прошлого цикла. Все меж-модульные
-петли — ровно один блок задержки, воспроизводимо.
+scsynth's bus semantics (the cycle's first write overwrites; InFeedback sees the partial sum at
+its own position) made a multi-writer port a lottery on node order: a reader heard only the
+writers EARLIER than itself in the tree. A port is now double: writers → the W bus;
+`\f2portCommit` (at the tail of the tree) carries the cycle's FULL sum W→R; readers read R and
+always get the whole sum of the previous cycle. Every cross-module loop is exactly one block of
+delay, reproducibly.
 
-## §stack: составной пресет — концепт v1 (2026-09)
+## §stack: the composite preset — concept v1 (2026-09)
 
-Решения зафиксированы с пользователем: **произвольный граф внутреннего роутинга**,
-**строго одна жизнь** (все под-модули гейтуются клетками стека как один инструмент),
-**наружу все внутренние параметры с префиксом + макро-ручки стека**.
+The decisions were settled with the owner: **an arbitrary internal routing graph**, **strictly
+one life** (every sub-module is gated by the stack's cells as one instrument), **all internal
+parameters exposed outward with a prefix, plus the stack's macro knobs**.
 
-### Зачем
+### Why
 
-Констелляция из §1 — модули-пресеты, разбросанные по дереву и связанные
-именованными портами — это ось «составляющие синта живут во времени». §stack —
-вторая ось: **несколько юнитов в одном атоме-пресете** с внутренним роутингом,
-одна клетка на дереве вместо пяти, без глобальных имён портов. Обе оси
-сосуществуют: стек может иметь внешние порты как любой модуль.
+The constellation of §1 — module-presets scattered across the tree and linked by named ports —
+is the axis «the parts of a synth live in time». §stack is the second axis: **several units
+inside one preset atom** with internal routing, one cell on the tree instead of five, and no
+global port names. The two axes coexist: a stack can have external ports like any module.
 
-### Модель данных (Preset)
+### The data model (Preset)
 
 ```ts
 stack?: {
-  units:  { id: string; unit: string }[];               // порядок = порядок нод (источники раньше процессоров)
-  routes: { from: string; to: string; arg: string }[];   // выход from → порт-вход to.arg (fmIn/srcIn/carIn/modIn/exIn)
-  output: string;                                        // id под-модуля, чей выход = выход пресета (out/outBus/portOut)
+  units:  { id: string; unit: string }[];               // order = node order (sources before processors)
+  routes: { from: string; to: string; arg: string }[];   // the output of `from` → the port input to.arg (fmIn/srcIn/carIn/modIn/exIn)
+  output: string;                                        // the id of the sub-module whose output is the preset's (out/outBus/portOut)
   macros?: { name: string; targets: { param: string; min: number; max: number }[] }[];
 }
 ```
 
-- `instrument` стека — служебное `"stack"`; `params` хранит все параметры
-  под-модулей **с префиксом** `id.param` (`osc.ratio`, `fx.depth`). Ключи с точкой
-  проходят весь тракт как есть: per-cell ключ шины санируется (`f2_…_osc_ratio`),
-  движку параметр — просто строка, моды/локи всех скоупов адресуют `osc.ratio`
-  без новых механизмов. UI режет префикс в подписи и берёт knownSpecs по
-  внутреннему имени (`ratio`).
-- Общие для стека поля — как у любого пресета: voices/artic/winTail/gateSrc/
-  telOut/portOut/portIns/outBuses. `portIns` стека адресуют под-модуль:
-  `{"osc.fmIn": "fm1"}`; `portOut`/`outBuses`/`telOut` относятся к `output`.
-- `amp` стека = `<output>.amp` (алиас в UI); у каждого под-модуля своя ADSR и amp
-  (префиксные) — гейт у всех один, огибающие синхронны по построению.
+- A stack's `instrument` is the service value `"stack"`; `params` holds every sub-module's
+  parameters **with a prefix**, `id.param` (`osc.ratio`, `fx.depth`). Keys with a dot travel
+  the whole path as they are: the per-cell bus key is sanitised (`f2_…_osc_ratio`), and to the
+  engine a parameter is just a string, so mods and locks in every scope address `osc.ratio`
+  with no new machinery. The UI trims the prefix in the label and takes knownSpecs by the
+  internal name (`ratio`).
+- The fields common to the stack are those of any preset: voices/artic/winTail/gateSrc/
+  telOut/portOut/portIns/outBuses. A stack's `portIns` address a sub-module:
+  `{"osc.fmIn": "fm1"}`; `portOut`/`outBuses`/`telOut` refer to `output`.
+- A stack's `amp` is `<output>.amp` (an alias in the UI); every sub-module has its own ADSR and
+  amp (prefixed) — the gate is common to all of them, so the envelopes are synchronous by
+  construction.
 
-### Компиляция (Go + TS байт-в-байт, как порты)
+### Compilation (Go + TS byte for byte, as with the ports)
 
-`~defs[dk]` как сейчас (`instrument: \stack`, параметры `'osc.ratio': 1.5` —
-символы в кавычках). В `~f2ReuseCfg[dk]` добавляется структурное поле:
+`~defs[dk]` as it is now (`instrument: \stack`, parameters `'osc.ratio': 1.5` — quoted
+symbols). `~f2ReuseCfg[dk]` gains a structural field:
 
 ```supercollider
 stack: [ (id: \osc, unit: \fmOscU, ins: (fmIn: \fx)),
@@ -386,68 +377,58 @@ stack: [ (id: \osc, unit: \fmOscU, ins: (fmIn: \fx)),
 stackOut: \fx
 ```
 
-(`routes` инвертируются в `ins` приёмника: `arg → id источника`; внешний порт-вход
-остаётся в `portIns` под префиксным именем арга). cfgSig пула получает `|k<stack>`
-— любая правка графа пересобирает пул на первом триггере (§cfg-sig).
+(`routes` are inverted into the receiver's `ins`: `arg → the source's id`; an external port
+input stays in `portIns` under the prefixed argument name). The pool's cfgSig gains `|k<stack>`
+— any edit of the graph rebuilds the pool on the first trigger (§cfg-sig).
 
-### \f2voice: голос стека = Group + N узлов
+### \f2voice: a stack's voice is a Group plus N nodes
 
-`mkVoice(vi)` при `cfg[\stack]`: создаёт **Group** (в подгруппе пресета §loop-order,
-хвостом) и внутри неё по одному Synth на под-модуль в порядке `units`. Приватные
-маршруты — стереопары из пула шин стека (`Bus.audio(s, 2·routes·nv)`, слот =
-маршрут × голос, фиксирован при спавне как порт-слоты): у маршрута **один
-писатель**, частичной суммы нет — W-шина напрямую, commit §port-sum не нужен;
-приёмник читает через InFeedback (ровно один блок задержки, петли легальны —
-контракт как у портов, §loop-cond кондиционеры работают). `output`-узел получает
-`\out` стека (ev[\out] / слот portOut); остальные — свои приватные шины.
+`mkVoice(vi)` with `cfg[\stack]` creates a **Group** (in the preset's §loop-order subgroup, at
+the tail) and inside it one Synth per sub-module in `units` order. The private routes are
+stereo pairs from the stack's bus pool (`Bus.audio(s, 2·routes·nv)`, the slot being route ×
+voice, fixed at spawn like the port slots): a route has **one writer**, so there is no partial
+sum — the W bus directly, and the §port-sum commit is not needed; the receiver reads through
+InFeedback (exactly one block of delay, loops legal — the same contract as the ports, and the
+§loop-cond conditioners work). The `output` node gets the stack's `\out` (ev[\out] or the
+portOut slot); the rest get their own private buses.
 
-Голос для остального кода — **прокси** (Event с функциями `set/map/isPlaying/
-nodeID`, sclang-идиома doesNotUnderstand): аргумент без префикса
-(`gate/t_trig/freq/out/buf`) — `grp.set` / `grp.map` (scsynth рассылает n_set/n_map
-всем детям; узлы без такого контрола его игнорируют); `osc.x` — демультиплекс в
-`nodes[\osc].set(\x)`; `isPlaying`/`nodeID` — группы (n_free группы = все узлы).
-**Всё остальное в \f2voice не меняется**: пул/rr/hidx, hold-прилипание, holdCont,
-§map-seed, §cell-trig, gateSrc (n_map группы), offAt/gate-off — работают поверх
-прокси. telId — только `output`-узлу, vi=0.
+To the rest of the code a voice is a **proxy** (an Event with `set/map/isPlaying/nodeID`
+functions, the sclang doesNotUnderstand idiom): an argument with no prefix
+(`gate/t_trig/freq/out/buf`) goes to `grp.set` / `grp.map` (scsynth broadcasts n_set/n_map to
+every child; nodes without that control ignore it); `osc.x` is demultiplexed into
+`nodes[\osc].set(\x)`; `isPlaying` and `nodeID` are the group's (n_free on the group = every
+node). **Nothing else in \f2voice changes**: the pool, round robin, hidx, hold sticking,
+holdCont, §map-seed, §cell-trig, gateSrc (n_map on the group), offAt and the gate-off all work
+on top of the proxy. telId goes to the `output` node only, vi=0.
 
-### Макро-ручки стека (этап 3 — ✅ реализован)
+### The stack's macro knobs
 
-Макро — **мод, а не параметр** (так оно модулируемо по правилам модов, а не слоёв):
-`stack.macros[i] = {name, value, targets: [{param, min, max}]}` декларативно в сейве,
-а при сборке сессии (`v2/session.ts expandMacros` ≡ Go `session.expandMacros`,
-одинаковые uid и порядок) разворачивается в обычные моды без правок движка:
-издатель — const-мод `p_<pid>_M<name>` на шину `bus:<pid>_m_<name>` (value =
-ручка; вход const, чейн/listen могут вести его как любой мод); на каждую цель —
-const-слушатель `p_<pid>_M<name>_<param>` на `id.param` с `depth = max−min`,
-`off = min` → `param = lerp(min, max, macro)`. Это preset-scope слой: локи ячеек
-по-прежнему перекрывают. Правка значения — живая (редеплоя нет), правка графа —
-структурная. UI: ряд MACRO в секции STACK (имя · DragNum · цели `param min…max ×`
-· «+ target ▾» из параметров пресета, диапазон по умолчанию = paramRange
-параметра или голого имени, иначе 0..1).
+A macro is **a mod, not a parameter** (so that it is modulatable by the rules of mods rather
+than of layers): `stack.macros[i] = {name, value, targets: [{param, min, max}]}` sits
+declaratively in the save, and when the session is assembled (`v2/session.ts expandMacros` ≡ Go
+`session.expandMacros`, identical uids and order) it expands into ordinary mods with no change
+to the engine: the publisher is a const mod `p_<pid>_M<name>` on the bus `bus:<pid>_m_<name>`
+(value = the knob; the input is const, and chain/listen can drive it like any mod); every
+target gets a const listener `p_<pid>_M<name>_<param>` on `id.param` with `depth = max−min` and
+`off = min` → `param = lerp(min, max, macro)`. This is a preset-scope layer: cell locks still
+override it. Editing the value is live (no redeploy); editing the graph is structural. In the
+UI: a MACRO row in the STACK section (name · DragNum · the targets `param min…max ×` · «+
+target ▾» from the preset's parameters, the default range being the parameter's paramRange —
+or the bare name's — and 0..1 otherwise).
 
-### UI (TensorView, секция MODULE → STACK)
+### UI (TensorView, the MODULE → STACK section)
 
-Список под-модулей (id + Menu юнита + ×), у каждого порт-входа под-модуля Menu
-«← под-модуль | внешний порт | —», радио «output», «+ юнит»; Tag-сводка графа
-(`osc ⇢ fx.carIn · fx → out`). Параметры карточки — группами по под-модулю.
-Макро-ряд: имя + цели (param, min, max). Сохранение/клон/дубликат — поля `stack`
-в списках sequencer.ts (как smooth/latch).
+A list of sub-modules (id + a unit Menu + ×), a Menu on each sub-module port input «← a
+sub-module | an external port | —», an «output» radio, «+ unit»; a Tag summary of the graph
+(`osc ⇢ fx.carIn · fx → out`). The card's parameters are grouped by sub-module. The macro row:
+a name plus targets (param, min, max). Saving, cloning and duplicating carry the `stack` field
+in the sequencer.ts lists (like smooth and latch).
 
-### Этапы
+### Risks
 
-1. **Модель + компиляторы + \f2voice**: `stack` в dsl-types/session (Go+TS),
-   эмиссия `~defs`/`cfg` с тестами байт-парности (synthPorts.test/compiler_test),
-   Group-прокси и приватные шины в \f2voice, cfgSig `|k`. Результат: стек из
-   JSON-сейва звучит из одной клетки.
-2. **UI**: секция STACK, группировка параметров, префикс-срез спеков, персист.
-3. **Макро**.
-4. **Библиотека стеков** (сохранить/вставить как инструмент) — по потребности.
-
-### Риски
-
-- Бюджет нод: Σ под-модулей × голосов (5 голосов × 4 юнита = 20 нод на пресет) —
-  показывать в rack-теге; n_set на группу — одно сообщение, дёшево.
-- Блок задержки на внутренний маршрут — как у портов, для FM-петель нормально.
-- Ключи с точкой: проверить regex-скрытия UI (`/^(f2|i_|t_|__)/` — по префиксу,
-  `osc.ratio` не режется) и SKIP_PARAMS (под-модули не экспонируют out/i_free/
-  tel_bus — их ставит стек).
+- The node budget: Σ sub-modules × voices (5 voices × 4 units = 20 nodes per preset) — show it
+  in the rack tag; an n_set on the group is one message, which is cheap.
+- One block of delay per internal route — as with the ports, and fine for FM loops.
+- Keys with a dot: check the UI's hiding regex (`/^(f2|i_|t_|__)/` — by prefix, so `osc.ratio`
+  is not caught) and SKIP_PARAMS (sub-modules do not expose out/i_free/tel_bus — the stack sets
+  those).

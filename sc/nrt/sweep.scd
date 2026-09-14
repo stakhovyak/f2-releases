@@ -841,7 +841,7 @@ spCheck = {
 // Four claims, each a number and not an ear.
 //
 // (1) preDly is TRANSPARENT AT 0. It has to be: the bus mode is the live kernel
-//     capture the owner asked to keep «непрерывно, как сейчас», and the delay
+//     capture the owner asked to keep «continuous, as it is now», and the delay
 //     line is new in v49. The obvious spelling — DelayN always in circuit —
 //     does NOT null: DelayN with a non-constant delaytime clamps to a ONE-SAMPLE
 //     minimum, so the whole bus render comes back one sample late. That is why

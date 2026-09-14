@@ -47,7 +47,7 @@ s.waitForBoot({
             if (p.notNil) { ("▶ F2 boot: remote_eval ← " ++ p).postln; p.load } { "✗ F2 boot: f2_remote_eval.scd not found".postln };
             0.3.wait;
             p = res.("f2_modsmooth.scd");
-            if (p.notNil) { ("▶ F2 boot: modsmooth ← " ++ p).postln; p.load };   // оверлей — строго после remote_eval
+            if (p.notNil) { ("▶ F2 boot: modsmooth ← " ++ p).postln; p.load };   // the overlay — strictly after remote_eval
         
             p = res.("f2units.scd");
             if (p.notNil) {
