@@ -59,7 +59,13 @@ environment variable.
 
 ## Documentation
 
-Checkout the [Wiki Page](https://github.com/stakhovyak/f2-releases/wiki)
+- **[docs/wiki/](docs/wiki/)** — the wiki: 29 pages covering the paradigm, the
+  runtime, every element of the interface, the modulation system, the built-in
+  synth library, and how to write your own instruments and effects. Start at
+  [Home](docs/wiki/Home.md) and [Philosophy](docs/wiki/Philosophy.md); it is
+  also published as this repository's GitHub Wiki.
+- A Russian translation of the older single-file manual is kept at
+  `docs/manuals/MANUAL.ru.md`. It predates the wiki and is no longer updated.
 
 ---
 
@@ -171,7 +177,7 @@ Randomness is fully deterministic (seeded per row/scene/iteration), value
 edits are heard immediately, and structural edits restart the row smoothly on
 the next loop boundary. The complete semantics — windows, ranks, spans, phase
 and seed inlets, macro channels — are covered in
-[the manual](docs/manuals/MANUAL.en.md).
+[the wiki](docs/wiki/Home.md).
 
 ![Param and Ramp param locks](/docs/images/shot7.png)
 
