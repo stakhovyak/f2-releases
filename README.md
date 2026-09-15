@@ -59,17 +59,7 @@ environment variable.
 
 ## Documentation
 
-- **[docs/manuals/MANUAL.en.md](docs/manuals/MANUAL.en.md)** — the full user
-  manual (English, ~50 pages): the window/scope modulation paradigm, every
-  modulator kind, every UI element, diagnostics, recipes, reference tables.
-  A PDF sits beside it.
-- **[docs/design/](docs/design/)** — the design specifications the built-in
-  instruments were implemented against, each written before its code and kept
-  in step with it: [CARDS](docs/design/CARDS.md) (the deck and the card
-  contract), [POLYSYNTH](docs/design/POLYSYNTH.md),
-  [SAMPLER](docs/design/SAMPLER.md), [POLYMER](docs/design/POLYMER.md),
-  [FILTER](docs/design/FILTER.md), [ENVELOPE](docs/design/ENVELOPE.md),
-  [MODULATION](docs/design/MODULATION.md).
+Checkout the [Wiki Page](https://github.com/stakhovyak/f2-releases/wiki)
 
 ---
 
