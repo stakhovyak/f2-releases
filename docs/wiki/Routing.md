@@ -121,7 +121,8 @@ There is a visual shortcut for the whole of §2, and it is how most routing gets
 practice.
 
 1. `⊕` in a modulator card's strip **arms the sight**. A badge says the mode is on; `Esc` or a
-   second click drops it.
+   second click drops it. **Right-clicking `⊕`** picks what the arm will build — see
+   [[Arm Kinds|Arm-Kinds]]; the default, `plain`, is what this section describes.
 2. While armed, every **addressable** control in the application is a target: another
    modulator's inlet, or a preset parameter — on a knob, a slider, a segmented row or a numeric
    field. Structural options are deliberately excluded: an option rebuilds a SynthDef from the
@@ -138,7 +139,17 @@ Aiming at another modulator's inlet adds a plain `⇢ target`. Aiming at a **syn
 creates (or finds) a **summing layer** in that parameter's preset and aims at its `value`
 inlet — a func `add` with `b = 0`, combine `sum`. That is why the knob keeps working: the
 modulation moves *around* its value rather than replacing it. When nothing writes to the layer
-any more, it is deleted with the last target.
+any more, it is deleted with the last target — and so is everything else the arm minted.
+
+Kinds other than `plain` put one or two **nodes** between the writer and that layer. The swing
+still means one thing in every kind — how far the knob moves at full modulation — because it
+always lives on the **last** edge of the chain. [[Arm Kinds|Arm-Kinds]] has the table.
+
+Once there is more than one arm on a control, the control says more than "something writes
+here": each arm gets its own ring shade, a band shows how far they can carry the value
+together and where the engine will pin it, a pip follows the hovered arm through its sweep,
+and dragging one ring onto another makes that arm hold this one's depth. The whole grammar is
+one table in [[Arm Kinds|Arm-Kinds]] §9.
 
 The drag sets the **swing in the knob's own units**, and the engine's `depth`/`offset` pair is
 derived from it:
@@ -152,7 +163,7 @@ offset = −from · depth              and scale(to)   = swing
 nothing, and gets `depth = 0` rather than a NaN.
 
 Dragging past a control's edge **widens its range** (the same `paramRange` a right-click edits)
-and marks it with an asterisk, rather than clamping and letting the number diverge from the
+and marks it with an asterisk — in whichever direction the swing went — rather than clamping and letting the number diverge from the
 picture. Depth is set once and by eye, so the drag is deliberately slower than a value drag —
 `aim drag`, ×2.5 by default, in **config**; Shift is four times finer again.
 
@@ -176,4 +187,4 @@ A modulator writes **either** into its own parameter (one layer, in a combine mo
 been chosen yet, sets `combine: sum` — the modulation adds, which changes no existing routing
 because there were no targets before.
 
-See also: [[Value Composition|Value-Composition]], [[Modulators]], [[Func]].
+See also: [[Arm Kinds|Arm-Kinds]], [[Value Composition|Value-Composition]], [[Modulators]], [[Func]].

@@ -21,7 +21,7 @@ sclang source you can read and edit while it plays.
 If you have patched a modular synth and written a few SynthDefs, everything here will be
 familiar except **one inversion** — and that inversion is the whole design.
 
-<div align="center"><samp>29 pages · the paradigm · the runtime · every element · the built-in library</samp></div>
+<div align="center"><samp>30 pages · the paradigm · the runtime · every element · the built-in library</samp></div>
 
 ---
 
@@ -187,6 +187,7 @@ escape hatch. The detail, including which clock owns what, is [[Architecture]].
 <a href="Forms">Forms</a><br/>
 <a href="Func">Func</a><br/>
 <a href="Routing">Routing</a><br/>
+<a href="Arm-Kinds">Arm Kinds</a><br/>
 <a href="Value-Composition">Value Composition</a><br/>
 <a href="Randomness">Randomness</a><br/>
 <a href="Harmony">Harmony</a>

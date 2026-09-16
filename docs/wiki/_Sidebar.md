@@ -27,6 +27,7 @@
 - [[Forms]]
 - [[Func]]
 - [[Routing]]
+- [[Arm Kinds|Arm-Kinds]]
 - [[Value Composition|Value-Composition]]
 - [[Randomness]]
 - [[Harmony]]

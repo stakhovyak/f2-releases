@@ -59,9 +59,11 @@ environment variable.
 
 ## Documentation
 
-- **[Wiki Page](https://github.com/stakhovyak/f2-releases/wiki)** — the wiki: 29 pages covering the paradigm, the
+- **[docs/wiki/](docs/wiki/)** — the wiki: 29 pages covering the paradigm, the
   runtime, every element of the interface, the modulation system, the built-in
-  synth library, and how to write your own instruments and effects. 
+  synth library, and how to write your own instruments and effects. Start at
+  [Home](docs/wiki/Home.md) and [Philosophy](docs/wiki/Philosophy.md); it is
+  also published as this repository's GitHub Wiki.
 - A Russian translation of the older single-file manual is kept at
   `docs/manuals/MANUAL.ru.md`. It predates the wiki and is no longer updated.
 
