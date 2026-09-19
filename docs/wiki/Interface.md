@@ -26,7 +26,7 @@ synth and preset definitions without a restart), and the generated-code toggle. 
 **Canvas** (centre) — blocks, cells and the tree. See [[Blocks and Cells|Blocks-and-Cells]]
 and [[Tree Operators|Tree-Operators]].
 
-**Palette** (right) — presets: instrument, colour, output buses, voices, articulation. See
+**Palette** (right) — presets: instrument, colour, voices, articulation; the output bus is chosen on the tree. See
 [[Palette]].
 
 **Scope bus** (left) — the value stack for whatever is selected: base, layers, the composed
@@ -43,6 +43,19 @@ default); its height drags from the top edge and is remembered. See
 
 Panel widths and the deck height are persisted, and are also editable numerically in
 **config**.
+
+In every sidebar that holds modulator cards — the scope editors and the palette — each kind of
+modulator sits on its own rail, one row of cards that scrolls sideways. The rail's height drags
+from its bottom edge; it is one height per kind, shared by every sidebar, remembered across
+reloads, and a double-click on the edge returns the kind to its default. A card is always its
+rail's height: make the rail shorter than a card's content and the card's body scrolls.
+
+Every section of the scope editors and the palette **folds** to its heading: a click on the
+heading — a panel's head, the heading row of a table under it, a modulator rail's caption —
+hides what is under it and leaves the heading with a chevron that says which way it is; a
+second click brings it back. Panels, tables and rails fold each on their own and each fold is
+remembered across reloads, so the cell editor's ramp rail can stay folded while the palette's
+stays open. The `?` buttons and the other controls that sit in a heading keep their own job.
 
 ---
 

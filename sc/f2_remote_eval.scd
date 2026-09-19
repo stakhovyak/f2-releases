@@ -100,6 +100,10 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
         "[f2] /hush".postln;
         { topEnvironment.use { Pdef.all.do(_.stop);
             if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying }) { ~f2PatGroup.freeAll };
+            // §scope-deck the decks (f2dsl §scope-deck) live OUTSIDE the pattern group, in
+            // ~f2DeckGroup after it, so freeAll leaves them running: every deck of every row
+            // goes with the voices (groups, buses, static maps, registry).
+            ~f2FreeAllDecks !? { |f| f.value };
             // §loop-order freeAll killed the voice SUBGROUPS while patGroup was still alive, so
             // clear the subgroup dictionary or the next spawn would land after a dead node.
             ~f2VGroups = nil; ~f2VGrp2 !? { |d| d.clear };   // §loop-order v2 (the old key — migration)

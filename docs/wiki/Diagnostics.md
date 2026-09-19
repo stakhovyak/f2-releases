@@ -76,6 +76,26 @@ This is the failure worth recognising by shape: a missing card never writes its 
 every card after it reads an empty bus and the preset goes quiet **from that point on**,
 looking exactly as if it were merely bypassed.
 
+### A held note re-attacks, hops or pumps at cell boundaries
+
+Under `hold` a run of touching cells of one preset **in one lane** (a row of a block, a branch
+of a `par`) is one note on one voice ([[Polyphony]] §2). If a long gate seems to re-attack, or
+a soft pump lands on every cell boundary, ask the engine which voice each hold event took:
+evaluate `topEnvironment[\f2DebugHold] = true` in sclang (the app's SC log shows sclang's
+output) and read one line per hold event —
+
+```
+[f2 hold] <row|preset> cid <cell> lane <lane> voice <n> cont|fresh|steal off-in <ms> respawned <bool>
+```
+
+`cont` is a continuation of the run on its voice, `fresh` a new note on a free voice,
+`steal from <lane>` a cross-lane steal because every voice was busy (the new note re-attacks
+and latches its own pitch, the older note is cut), `steal (merge)` the same-lane merge;
+`off-in` is that voice's pending gate-off relative to now. A run that shows `fresh` mid-run, or a cell of the other row landing as `cont` on this
+row's voice, means the lanes disagree between the deployed code and the engine: redeploy the
+row (the compilers tag every cell event with its lane) and restart SC if the engine file is
+older than the app. `topEnvironment[\f2DebugHold] = nil` stops the posts.
+
 ### The whole engine goes quiet after a long session
 
 The server's **audio bus pool** is exhausted. The message says so:

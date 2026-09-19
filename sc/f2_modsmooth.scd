@@ -1,6 +1,6 @@
 (
 ~mbLag   = ~mbLag ? (1/60);     
-~mbSmMax = ~mbSmMax ? 400;      
+~mbSmMax = ~mbSmMax ? 1600;      
 
 SynthDef(\f2_msmooth, { |raw=0, out=0, lag=0.016|
     Out.kr(out, VarLag.kr(In.kr(raw), lag.max(0.0002)));
@@ -21,13 +21,28 @@ OSCdef(\f2_setb, { |msg|
             if (v.notNil and: { v.asFloat.isNaN.not }) { ~mbRawAt.(msg[i].asSymbol).set(v) };
             i = i + 2 } };
 }, '/f2_setb').permanent_(true);
+// §post SMOOTH HOOK. A node mapped ONCE onto ~mbAt.(k) (a strip's post card,
+// f2dsl §post static maps) is never remapped by an event, so when the smoother
+// of k is created here — after that mapping — the node would stay on the raw
+// bus and hear the steps the smoother exists to remove. Right after a smoother
+// is created, topEnvironment[\f2SmoothHook] (defined by f2dsl; nil when that
+// file is not loaded — nothing happens) is called with (k, the smoothed bus)
+// and remaps every registered static consumer of k. Guarded: a failing hook
+// posts its error and never breaks the flag apply.
 ~f2FlagApply = { |k, flag|
     var syn = ~mbSyn[k];
+    var hook;
     if (syn.isNil and: { ~mbSyn.size < ~mbSmMax }) {
         var raw = ~mbRawAt.(k), sm = Bus.control(s, 1);
         ~mbSm.put(k, sm);
         syn = Synth(\f2_msmooth, [\raw, raw.index, \out, sm.index, \lag, ~mbLag], ~f2SmGroup);
         ~mbSyn.put(k, syn);
+        hook = topEnvironment[\f2SmoothHook];
+        if (hook.notNil) {
+            try { hook.value(k, sm) } { |err|
+                ("⚠ [f2 modsmooth] smooth hook for % failed: %".format(k, err.errorString)).postln;
+            };
+        };
     };
     if (syn.notNil) { syn.set(\lag, if (flag > 0.5, ~mbLag, 0.0002)) };
 };

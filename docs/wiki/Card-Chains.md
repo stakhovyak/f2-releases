@@ -125,4 +125,65 @@ The generated-code view ([[Tensor]]) shows the compiled `chain:` list, with each
 If a card is on the strip but missing from that list, it was bypassed or its unit failed to
 resolve — see [[Diagnostics]].
 
-See also: [[Synth Modules|Synth-Modules]], [[Palette]], [[Writing Synths|Writing-Synths]].
+## 9. The divider
+
+Everything above is *per voice*: with `voices: 4` and `copies: 2` a strip of three cards is
+twenty-four nodes, and a reverb at the end of it is eight reverbs. That is right for a filter
+or a comb — each note wants its own — and wrong for the things that belong to the *instrument*:
+a reverb, a compressor, a limiter, a chorus shared by every note.
+
+The strip can therefore be **cut in two**. In the deck the cut is a slot with its hairline
+always on and a small `post` cap; the cards right of it wear a `post` badge on their bar.
+It is saved as `chainDivider`, the index of the first card right of the cut.
+
+```
+ [Polysynth] ──▶ [filt] ──▶ [comb]   ║   [verb] ──▶ [comp] ──▶ out
+  per voice, per copy — as always    ║   ONE instance per preset
+```
+
+- **Left of the cut** nothing changes: every card once per voice and per copy, the stages
+  numbered as in §1.
+- **Right of the cut** the cards are the preset's **singletons**: one instance per preset per
+  row pool, spawned when the pool is created and freed with it, never multiplied by voices or
+  copies. They **read the sum** — every voice's (and every copy's) final stage is one bus, the
+  *post-in* pair, and the first post card reads it; each post card writes the next post stage
+  and the last one writes the preset's out through the output node, which applies `amp`.
+- A **source can never be right of the cut**. A source that played once for every note is not
+  a note; the deck does not offer the cut where a source would end up right of it, a source
+  added at or after the cut lands just before it, and a drag that would carry one across is
+  refused on the slot. Processors cross freely and the cut follows the count of the left part.
+- The cut is an index between two cards. A cut at the very start or past the last card means
+  nothing and is never saved; removing the last card on either side removes the cut with it.
+  **Bypass keeps a card's side** — a switch, not a move.
+
+**Envelopes.** A singleton has no note to be gated by. It selects `env = 1` forever, exactly
+as a processor inside a voice does (§2), and its tail lives as long as the pool — which is
+what a reverb after a polyphonic strip should do.
+
+**Telemetry and ports.** With a cut the strip's *output* card is the last post card, so that is
+where `telId` goes (the voice loop no longer hands it to a left card). A post card's port
+inputs read port slot 0. The preset's port *output* is written by the output node after the
+post part: slot 0 carries the summed signal.
+
+**Modulation.** A singleton's params have no per-cell key — there is no cell to key them by —
+so they are delivered **once per preset per tick** on the preset-level key. The value is the
+preset's base folded with every layer that reaches the singleton: the preset's own scope (the
+first note's instance), any parent scope above the sounding cells and any child scope below —
+the locks and ramps of every active cell's lineage, block and cell alike — deeper on top,
+ties in tree order, the same fold every per-cell key gets. When no cell of the preset is
+active the params **hold the base**, delivered every tick, so a knob turned in silence is
+heard the moment the reverb tail is. In the deck the ghost of a post knob follows that one value; there are never several
+needles, because there is never more than one instance.
+
+The generated `chain:` list (§8) keeps the left cards; the post cards appear in a `post:` list
+with their own `rd` / `wr` numbering (`rd 0` is the post-in bus, the last `wr −1` is the
+output node), a `postN:` count and a `postMap:` of the preset-level keys. A strip without a
+cut compiles exactly as before.
+
+**The same singletons, one level up.** A tree node and a block own a strip of exactly these
+processors too — a [[deck|Decks]], processing the sum of everything that plays under the node,
+alive on silence, after every preset's post cards and before the parent's deck or the rack.
+Where the post part is *the instrument's* effects, a deck is *the section's*.
+
+See also: [[Synth Modules|Synth-Modules]], [[Palette]], [[Writing Synths|Writing-Synths]],
+[[Polyphony]] §5, [[Decks]].

@@ -669,7 +669,7 @@
 	// ═══════════════════════════════════════════════════════════
 	// §reuse — SYNTH REUSE (persistent voices instead of a spawn per note)
 	// ───────────────────────────────────────────────────────────
-	// A pool of persistent synths PER PRESET (voices 1..5). A cell's event does NOT spawn a new
+	// A pool of persistent synths PER PRESET (voices 1..16). A cell's event does NOT spawn a new
 	// synth — it takes a voice from the pool, MAPS its modulatable arguments onto the per-cell
 	// buses (~mbAt) and gates it. The voice is always alive (i_free=0), so grPos reads a bus that
 	// is already filled from the base WITHOUT a birth race (the onset click goes away), and the
@@ -703,9 +703,15 @@
 	// bypassed / removed card — is dropped silently), broadcast the shared
 	// gate/t_trig/freq to the group, and route un-prefixed unit params: a
 	// stack sends them (amp, atk…) to its output node, a strip with a sink
-	// sends `amp` to the sink and drops every other plain name (each card's
-	// own params are `id__param`). Bodies avoid bare ~ (called from Event:play
-	// — see the note in f2units.scd).
+	// sends `amp` and `out` to the sink and drops every other plain name (each
+	// card's own params are `id__param`). §node-bus a plain `out` is the
+	// preset's rack bus, set per event by \f2voice: it goes to the ONE node
+	// that writes the preset's output (the sink, or a stack's output node),
+	// never to the group — a broadcast would move every card off its stage
+	// slot. §post a strip with a divider has NO sink per voice (post: true on
+	// the proxy): the pool-level sink in pool[\post] takes `amp` and `out`,
+	// set by \f2voice itself, and the demux drops them here. Bodies avoid
+	// bare ~ (called from Event:play — see the note in f2units.scd).
 	~f2VNode = { |v| if (v.isKindOf(Event)) { v[\grp].nodeID } { v.tryPerform(\nodeID) } };
 	// §cards liveness: user SynthDefs from Synths/ use doneAction: 2 and have no
 	// i_free — as a card such a node self-frees after its first release while
@@ -714,11 +720,16 @@
 	// sink) is registered at spawn, so a dead child marks the voice dead and
 	// the pool respawns it (freeing the group first — nothing leaks).
 	~f2VPlaying = { |v|
+		// §stack a group of copies is alive when its group and every copy are
+		if (v.isKindOf(Event) and: { v[\copies].notNil }) {
+			v[\grp].isPlaying and: { v[\copies].every { |c| topEnvironment[\f2VPlaying].value(c) } }
+		} {
 		if (v.isKindOf(Event)) {
 			v[\grp].isPlaying
 				and: { v[\nodes].values.every { |n| n.isPlaying } }
 				and: { v[\sink].isNil or: { v[\sink].isPlaying } }
 		} { v.isPlaying }
+		}
 	};
 	~f2VDemux = { |v, args|   // flat [k, val …] → (shared: [...], per: id → [...], sink: [...])
 		var shared = [], per = IdentityDictionary.new, sink = [];
@@ -734,14 +745,21 @@
 				if (v[\nodes][id].notNil) { per[id] = (per[id] ? []) ++ [an, val] };
 			} {
 				if (#[\gate, \t_trig, \freq].includes(k)) { shared = shared ++ [k, val] } {
-					if (v[\sink].notNil) {
-						// §cards strip: `amp` is the PRESET level (output node); any other
-						// plain name has no addressee
-						if (k == \amp) { sink = sink ++ [k, val] };
+					if (v[\sink].notNil or: { v[\post] == true }) {
+						// §cards strip: `amp` is the PRESET level (output node) and
+						// `out` (§node-bus) the bus it writes; any other plain name has
+						// no addressee. §post with a divider the sink is the pool's (no
+						// per-voice sink, v[\sink] nil): the pair is collected and dropped
+						// by ~f2VSet/~f2VMap — \f2voice addresses pool[\post][\sink] itself.
+						if (k == \amp or: { k == \out }) { sink = sink ++ [k, val] };
 					} {
 						// stack (or a strip without f2units' output node): plain unit
-						// params go to the output node; an empty strip has none (out =
-						// nil) and drops them (never a nil key).
+						// params — `out` included (§node-bus) — go to the output node; an
+						// empty strip has none (out = nil) and drops them (never a nil
+						// key). Legacy strip layout (no sink) or a strip/stack whose
+						// stage bus failed to allocate: only the output node follows a
+						// per-event `out`; the other cards that write the out directly
+						// keep the bus baked at spawn.
 						v[\out] !? { |oid| per[oid] = (per[oid] ? []) ++ [k, val] };
 					};
 				};
@@ -750,20 +768,31 @@
 		(shared: shared, per: per, sink: sink)
 	};
 	~f2VSet = { |v, args|
+		// §stack every copy takes the set (gate, freq, t_trig, plain params alike)
+		if (v.isKindOf(Event) and: { v[\copies].notNil }) {
+			v[\copies].do { |c| topEnvironment[\f2VSet].value(c, args) };
+		} {
 		if (v.isKindOf(Event)) {
 			var d = topEnvironment[\f2VDemux].value(v, args);
 			if (d[\shared].size > 0) { v[\grp].set(*d[\shared]) };
 			d[\per].keysValuesDo { |id, a| v[\nodes][id] !? { |n| n.set(*a) } };
 			if (d[\sink].size > 0) { v[\sink] !? { |n| n.set(*d[\sink]) } };
 		} { v.set(*args) };
+		}
 	};
 	~f2VMap = { |v, param, idx|
+		// §stack one bus for every copy (the gate, a channel gate): per-copy buses
+		// go through the f2map loop of \f2voice, which addresses each copy itself
+		if (v.isKindOf(Event) and: { v[\copies].notNil }) {
+			v[\copies].do { |c| topEnvironment[\f2VMap].value(c, param, idx) };
+		} {
 		if (v.isKindOf(Event)) {
 			var d = topEnvironment[\f2VDemux].value(v, [param, idx]);
 			if (d[\shared].size > 0) { v[\grp].map(*d[\shared]) };
 			d[\per].keysValuesDo { |id, a| v[\nodes][id] !? { |n| n.map(*a) } };
 			if (d[\sink].size > 0) { v[\sink] !? { |n| n.map(*d[\sink]) } };
 		} { v.map(param, idx) };
+		}
 	};
 	// §bus-gen freeing a stage-bus registry entry. An entry remembers the ALLOCATOR it took its
 	// bus from: after s.newBusAllocators (a server reboot with sclang still alive) the allocator is
@@ -852,6 +881,52 @@
 		if (e.isNil) { nil } { e[\bus] }
 	};
 
+	// §post STATIC BUS MAPS. A post card (a strip's singleton processor, see
+	// §post in \f2voice) is mapped ONCE at spawn onto the preset-level bus of
+	// each of its live params — there is no per-event remap for it, so when
+	// f2_modsmooth creates the SMOOTHER of that key later (the core flags the
+	// key as modulated on its first ramp), nobody would move the node from the
+	// raw bus to the smoothed one. The registry remembers (node, param) per
+	// key; ~f2FlagApply calls ~f2SmoothHook right after it creates a smoother
+	// and the hook remaps every registered consumer of the key. Entries leave
+	// with their post group (~f2FreePost) or when the node is found dead.
+	// Bodies avoid bare ~ (the hook runs inside the OSCdef's topEnvironment.use,
+	// the registration inside Event:play).
+	~f2StaticMaps = ~f2StaticMaps ?? { IdentityDictionary.new };
+	~f2StaticMapAdd = { |key, node, param, grp|
+		var reg = topEnvironment[\f2StaticMaps];
+		if (reg.isNil) { reg = IdentityDictionary.new; topEnvironment[\f2StaticMaps] = reg };
+		reg[key] = (reg[key] ? []).add((node: node, param: param, grp: grp));
+	};
+	~f2SmoothHook = { |k, sm|
+		var reg = topEnvironment[\f2StaticMaps];
+		var list = reg !? { reg[k] };
+		var kept = [];
+		if (list.notNil and: { sm.notNil }) {
+			list.do { |e|
+				if (e[\node].isPlaying) {
+					e[\node].map(e[\param], sm.index);
+					kept = kept.add(e);
+				};
+			};
+			if (kept.size == 0) { reg.removeAt(k) } { reg[k] = kept };
+		};
+	};
+	// §post freeing a pool's post group: n_free on the group (error suppressed —
+	// a hush may have taken it already) and its static-map entries dropped.
+	~f2FreePost = { |p|
+		var reg = topEnvironment[\f2StaticMaps];
+		if (p.notNil and: { p[\grp].notNil }) {
+			s.sendBundle(nil, [\error, 0], [\n_free, p[\grp].nodeID], [\error, 1]);
+			reg !? {
+				reg.keys.asArray.do { |k|
+					var kept = reg[k].reject { |e| e[\grp] === p[\grp] };
+					if (kept.size == 0) { reg.removeAt(k) } { reg[k] = kept };
+				};
+			};
+		};
+	};
+
 	~f2FreeSceneVoices = { |sceneKey|
 		var pre = sceneKey.asString ++ "|";
 		var sreg = topEnvironment[\f2StackBus];
@@ -863,9 +938,11 @@
 					pool[\synths].do { |sy| if (sy.notNil) {
 						s.sendBundle(nil, [\error, 0], [\n_set, ~f2VNode.(sy), \gate, 0], [\error, 1]);
 					} };
+					// §post the pool's post group goes with the voices, after their
+					// release (it is what the releasing voices sound through)
 					TempoClock.default.sched(0.4, { pool[\synths].do { |sy| if (sy.notNil) {
 						s.sendBundle(nil, [\error, 0], [\n_free, ~f2VNode.(sy)], [\error, 1]);
-					} }; nil });
+					} }; pool[\post] !? { |p| topEnvironment[\f2FreePost].value(p) }; nil });
 				};
 			};
 		};
@@ -883,6 +960,399 @@
 				};
 			};
 		};
+	};
+	// ═══════════════════════════════════════════════════════════
+	// §scope-deck — DECKS ON TREE NODES AND BLOCKS
+	// (docs/design/SCOPE-DECKS.md §5 stage 5, docs/wiki/Decks.md, SYNTH-MODULES.md "Decks")
+	// ───────────────────────────────────────────────────────────
+	// Every tree container and every block owns a DECK: a strip of sound-
+	// PROCESSING singleton cards (processors with a chainIn — no sources, no
+	// modulators), empty by default. A deck is ONE instance per (row × scope),
+	// alive on silence (a reverb tail rings out over a rest, a knob turned in
+	// silence is heard the moment a note lands), created at deploy, KEPT across
+	// redeploys while its cards are unchanged, freed when the row stops or the
+	// deck is removed. The ROUTING is the compilers' (session builders, both
+	// engines): a node's deck processes only the children that INHERIT its bus;
+	// a child that overrides the bus is its own exit into the rack. So every
+	// event carries `f2deck: '<scope>'` — the deck it feeds — and the ~enrich
+	// wrapper asks ~f2DeckIn.(row, scope) for that deck's IN pair and puts it on
+	// the event's \out (the existing per-event out path of \f2voice — voice
+	// outAt / pool[\postOut] — applies it; nothing in \f2voice changes); nil →
+	// the event falls back to its outBus.
+	//
+	// THE REGISTRY ~f2Decks: rowKey → (scopeSymbol → entry). An entry: grp (the
+	// deck's Group inside ~f2DeckGroup), nodes (id → Synth), nodeCtl (id → the
+	// def's control names), sink (\f2chainOut, amp 1: a deck has no level of its
+	// own), bus (Bus.audio(s, 2·(deckN+1)): pair 0 = the deck's IN pair, pairs
+	// 1..deckN the stages — card i reads i, writes i+1, the last writes -1 = the
+	// sink's input, pair deckN), sig, depth, scope, sinkScope, busName, outIdx,
+	// at (creation time). THE LADDER ~f2DeckGroup: one Group.after(~f2PatGroup)
+	// — every voice executes before it (voices live in ~f2PatGroup, at the head
+	// of the default group; the /f2/eval handler recreates that group at the
+	// head before every eval, so a deck group created after ANY pattern group
+	// sits after all of them) and the rack groups (Group.tail at the rack
+	// deploy) after it. Created lazily; when ~f2PatGroup is nil the deck group
+	// is Group.tail(s.defaultGroup) with a warning once (the rack then reads
+	// its buses BEFORE the decks write them — a deck routed to the rack is
+	// lost until the next deploy recreates the pattern group).
+	// Inside the ladder the decks of a row execute DEEPEST FIRST: ~f2DeckSync
+	// moves the row's deck groups to the tail of ~f2DeckGroup by depth
+	// descending (ties by scope string), so a child's output is read by its
+	// parent in the same cycle (In.ar, no delay, exactly like the rack's
+	// pipeline). Decks of other rows keep their relative order — they write
+	// rack buses or their own row's decks only.
+	//
+	// ~f2DeckSync.(rowKey, defs) — the compiled program's sync line (both
+	// compilers, ALWAYS emitted, right after ~f2FreeSceneVoices and before
+	// ~play): defs = [(scope, depth, cards: [(id, unit, opts?, rd, wr)…],
+	// deckN, deckMap: [\id__param, \scKey …] (live) | deckArgs: [\id__param,
+	// value …] (bake), sink: '<scope>'|nil, bus: \name|nil)…] deepest first.
+	// (a) every registered deck of the row whose scope is absent from defs is
+	// freed (an empty list frees them all); (b) per def a SIGNATURE (scope,
+	// depth, cards id:unit:opts:rd:wr@variant, deckN, the deckMap pairs or the
+	// deckArgs) — an entry with the same sig is KEPT, its tails survive, only
+	// its sink target is refreshed; a different sig frees the old entry and
+	// builds a new one (its bus is REUSED when the pair count is unchanged, so
+	// the IN pair the sounding voices already write stays valid); (c) the
+	// build: one Synth per card via the unit's SynthDef variant (~f2UnitDef —
+	// the deploy's ~f2UnitEnsure lines built it), args [\out <wr pair | sink
+	// input>, \gate 1, \chainIn <rd pair>] + [\i_free 0] when the def has it,
+	// the tempo bus mapped when it has \tempo, a card without chainIn is
+	// spawned but its stream dropped (warned once, like mkPost), a card whose
+	// def is missing is skipped (~f2UnitGone); then the sink LAST; (d) the OUT
+	// of a deck, resolved in a SECOND pass once every deck of the row exists
+	// (a child needs its parent's IN pair, and the parent is built after it):
+	// sink notNil → that deck's IN pair (~f2DeckIn), else bus notNil →
+	// ~rack.bus[bus].index, else ~rack.bus[\main].index, else 0; (e) the
+	// order (above); (f) params — live: every (\id__param, \scKey) of deckMap
+	// whose node declares the param is mapped ONCE onto ~mbAt.(key) and
+	// registered with ~f2StaticMapAdd so the smoother created later for that
+	// key remaps it (~f2SmoothHook, exactly like a post card); bake: deckArgs
+	// are plain synth args at creation. A deck param never rides an event (no
+	// per-cell key, no f2map, no init line).
+	// ~f2DeckIn.(rowKey, scope) → the IN pair index or nil (no such deck, or
+	// its bus could not be allocated — the allocation failure is posted at
+	// every failed build, like ~f2StackBusAt; the event then falls back to its
+	// outBus).
+	// ~f2FreeSceneDecks.(rowKey) — the row's stop snippet (conductor Stop /
+	// stopRowPdef): the row's decks leave the registry at once and are FREED
+	// after the voices' release (~f2StackBusAfterBeats.(0.4) ≥ 0.5 s — the
+	// releasing voices sound through them, the post-group pattern): n_free the
+	// group with the error suppressed, the static-map entries of the group
+	// dropped, the bus freed. ~f2FreeAllDecks — /f2/hush: every deck of every
+	// row at once (groups, buses, static maps, registry cleared) right after
+	// ~f2PatGroup.freeAll — decks live outside the pattern group, a hush would
+	// otherwise leave them running.
+	// LIMITS: no ports, no telId, no resource buffers (sample / IR / curve) on
+	// a deck card; bake mode bakes the values (a value change rebuilds the
+	// deck — its tail restarts); a bus-allocation failure bypasses the deck.
+	// Bodies avoid bare ~ (~f2DeckIn runs inside Event play through the
+	// wrapper; the frees run from the hush OSCdef and from deferred clocks) —
+	// a local `top` as \f2voice does; the rack is read through globalEnv
+	// exactly as ~enrich reads it.
+	~f2Decks = ~f2Decks ?? { IdentityDictionary.new };
+	~f2DeckWarn = { |key, msg|
+		var top = topEnvironment;
+		if (top[\f2UnitWarnOnce].notNil) { top[\f2UnitWarnOnce].(key, msg) } {
+			var seen = top[\f2DeckWarned];
+			if (seen.isNil) { seen = IdentitySet.new; top[\f2DeckWarned] = seen };
+			if (seen.includes(key.asSymbol).not) { seen.add(key.asSymbol); msg.postln };
+		};
+		nil
+	};
+	// the ladder group (lazy). register(true) assumes the group playing at
+	// once; isPlaying turns false only when the server reports its end (a hush
+	// does not free it, a CmdPeriod does). A group younger than a second is
+	// trusted as it is; an older one that is not playing (dead, or created
+	// against a stale target) is replaced.
+	~f2DeckGroupAt = {
+		var top = topEnvironment;
+		var g = top[\f2DeckGroup];
+		var pg = top[\f2PatGroup];
+		var at = top[\f2DeckGroupAtT] ? 0;
+		if (g.isNil or: { g.isPlaying.not and: { (Main.elapsedTime - at) > 1 } }) {
+			if (pg.notNil) {
+				g = Group.after(pg);
+			} {
+				g = Group.tail(s.defaultGroup);
+				top[\f2DeckWarn].value(\deck_group_tail,
+					"⚠ [f2 deck] no pattern group — the deck group sits at the TAIL of the default group, after the rack: decks routed to a rack bus are silent until the next deploy");
+			};
+			g.register(true);
+			top[\f2DeckGroup] = g;
+			top[\f2DeckGroupAtT] = Main.elapsedTime;
+		};
+		g
+	};
+	// the resolved def of a deck card: the unit's SynthDef VARIANT for its opts
+	// (~f2UnitDef — the base def until the variant is built), the unit itself
+	// without opts or without f2units.
+	~f2DeckCardDef = { |c|
+		var top = topEnvironment;
+		if (c[\opts].notNil and: { top[\f2UnitDef].notNil })
+			{ top[\f2UnitDef].(c[\unit], c[\opts]) ? c[\unit].asSymbol } { c[\unit].asSymbol }
+	};
+	// the signature a kept deck is compared by (see (b) above); a String
+	~f2DeckSig = { |d|
+		var top = topEnvironment;
+		var sg = d[\scope].asString ++ "#" ++ (d[\depth] ? 0).asString ++ "|c";
+		(d[\cards] ? []).do { |c|
+			var udef = top[\f2DeckCardDef].value(c);
+			sg = sg ++ c[\id].asString ++ ":" ++ c[\unit].asString ++ ":"
+				++ (c[\opts] !? { |o| o.keys.asArray.collect(_.asString).sort.collect { |kk|
+					kk ++ "=" ++ (o[kk.asSymbol] ? o[kk]).asString }.join(",") } ? "")
+				++ ":" ++ (c[\rd] ? 0).asString ++ ":" ++ (c[\wr] ? (-1)).asString
+				++ (if (udef != c[\unit].asSymbol) { "@" ++ udef.asString } { "" }) ++ ";";
+		};
+		sg = sg ++ "|n" ++ (d[\deckN] ? 0).asString;
+		d[\deckMap] !? { |m| sg = sg ++ "|m"; m.pairsDo { |k, v| sg = sg ++ k.asString ++ "=" ++ v.asString ++ ";" } };
+		d[\deckArgs] !? { |m| sg = sg ++ "|a"; m.pairsDo { |k, v| sg = sg ++ k.asString ++ "=" ++ v.asString ++ ";" } };
+		sg
+	};
+	// freeing ONE entry: n_free on its group (error suppressed — a hush or a
+	// server restart may have taken it), its static-map entries dropped (by
+	// group, like ~f2FreePost), its bus freed unless the caller keeps it for
+	// the rebuilt deck (keepBus).
+	~f2DeckFree = { |e, keepBus = false|
+		var top = topEnvironment;
+		var reg = top[\f2StaticMaps];
+		if (e.notNil) {
+			e[\grp] !? { |g|
+				s.sendBundle(nil, [\error, 0], [\n_free, g.nodeID], [\error, 1]);
+				reg !? {
+					reg.keys.asArray.do { |k|
+						var kept = reg[k].reject { |x| x[\grp] === g };
+						if (kept.size == 0) { reg.removeAt(k) } { reg[k] = kept };
+					};
+				};
+			};
+			// the bus: freed only when it came from the CURRENT allocator (after a
+			// server reboot an old index belongs to someone else — ~f2StackBusRel)
+			if (keepBus.not and: { e[\alloc] === s.audioBusAllocator }) { e[\bus] !? { |b| try { b.free } } };
+			e[\bus] = nil;
+			e[\grp] = nil;
+		};
+		nil
+	};
+	// the IN pair of a row's deck, or nil
+	~f2DeckIn = { |rowKey, scope|
+		var reg = topEnvironment[\f2Decks];
+		var row = reg !? { reg[rowKey.asSymbol] };
+		var e = row !? { row[scope.asSymbol] };
+		if (e.notNil and: { e[\bus].notNil }) { e[\bus].index } { nil }
+	};
+	// the OUT of an entry (see (d) above)
+	~f2DeckOutIdx = { |rowKey, e|
+		var top = topEnvironment;
+		var rack = globalEnv.at(\rack);
+		var buses = rack !? { rack[\bus] };
+		var idx;
+		e[\sinkScope] !? { |sc| idx = top[\f2DeckIn].value(rowKey, sc) };
+		if (idx.isNil and: { e[\busName].notNil } and: { buses.notNil }) {
+			idx = buses[e[\busName].asSymbol] !? { |b| b.index };
+		};
+		if (idx.isNil and: { buses.notNil }) { idx = buses[\main] !? { |b| b.index } };
+		idx ? 0
+	};
+	// building ONE deck (see (c) above); nil when \f2chainOut is not loaded
+	// (said once) or the bus could not be allocated (said at every attempt).
+	// `oldBus` = the bus of the entry this one replaces, when its pair count
+	// fits.
+	~f2DeckBuild = { |rowKey, d, sig, oldBus|
+		var top = topEnvironment;
+		var scope = d[\scope].asSymbol;
+		var cards = d[\cards] ? [];
+		var n = (d[\deckN] ? cards.size).asInteger.max(0);
+		var dArgs = d[\deckArgs], dMap = d[\deckMap];
+		var bus, grp, sink, e, pair;
+		var nodes = IdentityDictionary.new, nodeCtl = IdentityDictionary.new;
+		if (SynthDescLib.global.at(\f2chainOut).isNil) {
+			top[\f2DeckWarn].value(\deck_nosink,
+				"⚠ [f2 deck] \\f2chainOut is not loaded (f2units missing) — decks are bypassed until it is");
+			nil
+		} {
+			bus = if (oldBus.notNil and: { oldBus.numChannels == (2 * (n + 1)) }) { oldBus } { Bus.audio(s, 2 * (n + 1)) };
+			if (bus.isNil) {
+				("✗ f2: cannot allocate a deck bus (% ch) for % of row % — the server's audio bus pool is exhausted; raise s.options.numAudioBusChannels and reboot the server. The deck is bypassed.").format(2 * (n + 1), scope, rowKey).postln;
+				nil
+			} {
+				pair = { |j| bus.index + (2 * j) };
+				grp = Group.new(top[\f2DeckGroupAt].value, \addToTail);
+				grp.register(true);
+				cards.do { |c|
+					var id = c[\id].asSymbol;
+					var udef = top[\f2DeckCardDef].value(c);
+					var ud = SynthDescLib.global.at(udef);
+					var uc = if (ud.notNil) { ud.controlNames } { [] };
+					var rd = (c[\rd] ? 0).asInteger.max(0), wr = (c[\wr] ? (-1)).asInteger;
+					var ua = [\out, pair.(if (wr < 0) { n } { wr }), \gate, 1];
+					if (uc.includes(\chainIn)) {
+						ua = ua ++ [\chainIn, pair.(rd)];
+					} {
+						if (ud.notNil) {
+							top[\f2DeckWarn].value(("deck_chainIn_" ++ udef.asString).asSymbol,
+								"⚠ [f2 deck] %: card % (%) reads deck stage % but has no chainIn — stream dropped".format(scope, id, udef, rd));
+						};
+					};
+					if (uc.includes(\i_free)) { ua = ua ++ [\i_free, 0] };
+					// bake: this card's baked values (`id__param` split like mkPost splits pstMap)
+					if (dArgs.notNil) {
+						var pre = id.asString ++ "__";
+						dArgs.pairsDo { |pk, v|
+							var ks = pk.asString;
+							if (ks.beginsWith(pre) and: { v.isNumber }) {
+								var an = ks.copyToEnd(pre.size).asSymbol;
+								if (uc.includes(an)) { ua = ua ++ [an, v] };
+							};
+						};
+					};
+					if (ud.notNil) {
+						var nd = Synth(udef, ua, grp, \addToTail);
+						nd.register(true);
+						if (uc.includes(\tempo) and: { top[\f2TempoBus].notNil }) {
+							nd.map(\tempo, top[\f2TempoBus].index);
+						};
+						nodes[id] = nd;
+						nodeCtl[id] = uc;
+					} {
+						if (top[\f2UnitGone].notNil) {
+							top[\f2UnitGone].(c[\unit], "deck " ++ scope.asString, id);
+						} {
+							("⚠ [f2 deck] %: card % has no SynthDef % — card skipped, and everything after it is silent".format(scope, id, udef)).postln;
+						};
+					};
+				};
+				e = (grp: grp, nodes: nodes, nodeCtl: nodeCtl, bus: bus, alloc: s.audioBusAllocator, sig: sig, scope: scope,
+					deckN: n, depth: (d[\depth] ? 0).asInteger, at: Main.elapsedTime,
+					sinkScope: d[\sink] !? { |x| x.asSymbol }, busName: d[\bus] !? { |x| x.asSymbol });
+				// the sink LAST: the final pair → a preliminary out (the second pass
+				// of ~f2DeckSync refreshes it once every deck of the row exists)
+				e[\outIdx] = top[\f2DeckOutIdx].value(rowKey, e);
+				sink = Synth(\f2chainOut, [\in, pair.(n), \out, e[\outIdx], \amp, 1], grp, \addToTail);
+				sink.register(true);
+				e[\sink] = sink;
+				// live: the static maps (top.use: ~mb/~mbSm live inside ~mbAt)
+				if (dMap.notNil) {
+					top.use {
+						dMap.pairsDo { |pk, key|
+							var ks = pk.asString, i = ks.find("__"), id, an, nd, b;
+							if (i.notNil and: { i > 0 }) {
+								id = ks.copyFromStart(i - 1).asSymbol;
+								an = ks.copyToEnd(i + 2).asSymbol;
+								nd = nodes[id];
+							};
+							// a param the node's def declares; an id without a node (a
+							// skipped card) or an unknown param is dropped silently
+							if (nd.notNil and: { (nodeCtl[id] ? []).includes(an) }) {
+								b = ~mbAt.(key.asSymbol);
+								if (b.notNil) {
+									nd.map(an, b.index);
+									top[\f2StaticMapAdd].(key.asSymbol, nd, an, grp);
+								};
+							};
+						};
+					};
+				};
+				e
+			}
+		}
+	};
+	// the sync (see above)
+	~f2DeckSync = { |rowKey, defs|
+		var top = topEnvironment;
+		var reg = top[\f2Decks];
+		var rk = rowKey.asSymbol;
+		var row, dg, ordered;
+		if (reg.isNil) { reg = IdentityDictionary.new; top[\f2Decks] = reg };
+		row = reg[rk];
+		if (row.isNil) { row = IdentityDictionary.new; reg[rk] = row };
+		defs = defs ? [];
+		// (a) vanished decks
+		row.keys.asArray.do { |sc|
+			if (defs.detect { |d| d[\scope].asSymbol == sc }.isNil) {
+				top[\f2DeckFree].value(row[sc]);
+				row.removeAt(sc);
+			};
+		};
+		// (b)/(c) keep or rebuild, in the given order (deepest first)
+		defs.do { |d|
+			var sc = d[\scope].asSymbol;
+			var sig = top[\f2DeckSig].value(d);
+			var e = row[sc];
+			var oldBus;
+			if (e.notNil and: { sig != e[\sig]
+				or: { e[\grp].isNil }
+				or: { e[\grp].isPlaying.not and: { (Main.elapsedTime - (e[\at] ? 0)) > 1 } } }) {
+				// its bus is handed to the rebuild (reused when the pair count fits,
+				// else RETIRED after the voices' release — the sounding voices still
+				// write it); a bus from a previous server life is only forgotten
+				if (e[\alloc] === s.audioBusAllocator) { oldBus = e[\bus] };
+				top[\f2DeckFree].value(e, true);
+				row.removeAt(sc);
+				e = nil;
+			};
+			if (e.isNil) {
+				e = top[\f2DeckBuild].value(rk, d, sig, oldBus);
+				if (e.notNil) { row[sc] = e };
+				if (oldBus.notNil and: { e.isNil or: { e[\bus] !== oldBus } }) {
+					top[\f2StackBusRetire].value((bus: oldBus, alloc: s.audioBusAllocator),
+						top[\f2StackBusAfterBeats].value(0.4));
+				};
+			} {
+				// kept: only its target is refreshed
+				e[\sinkScope] = d[\sink] !? { |x| x.asSymbol };
+				e[\busName] = d[\bus] !? { |x| x.asSymbol };
+				e[\depth] = (d[\depth] ? 0).asInteger;
+			};
+		};
+		// (d) second pass: every sink target, now that every deck of the row exists
+		row.keysValuesDo { |sc, e|
+			var idx = top[\f2DeckOutIdx].value(rk, e);
+			if (e[\outIdx] != idx) {
+				e[\outIdx] = idx;
+				e[\sink] !? { |sk| sk.set(\out, idx) };
+			};
+		};
+		// (e) deepest first inside the ladder
+		if (row.size > 0) {
+			dg = top[\f2DeckGroupAt].value;
+			ordered = row.values.asArray.sort { |a, b|
+				(a[\depth] > b[\depth]) or: {
+					(a[\depth] == b[\depth]) and: { a[\scope].asString < b[\scope].asString } }
+			};
+			ordered.do { |e| e[\grp] !? { |g| g.moveToTail(dg) } };
+		} {
+			reg.removeAt(rk);
+		};
+		nil
+	};
+	// a row's stop: off the registry now, freed after the voices' release
+	~f2FreeSceneDecks = { |rowKey|
+		var top = topEnvironment;
+		var reg = top[\f2Decks];
+		var rk = rowKey.asSymbol;
+		var row = reg !? { reg[rk] };
+		if (row.notNil) {
+			reg.removeAt(rk);
+			SystemClock.sched(top[\f2StackBusAfterBeats] !? { |f| f.value(0.4) } ? 0.5, {
+				row.values.asArray.do { |e| top[\f2DeckFree].value(e) };
+				nil
+			});
+		};
+		nil
+	};
+	// /f2/hush: every deck of every row, at once
+	~f2FreeAllDecks = {
+		var top = topEnvironment;
+		var reg = top[\f2Decks];
+		var dg = top[\f2DeckGroup];
+		reg !? {
+			reg.values.asArray.do { |row| row.values.asArray.do { |e| top[\f2DeckFree].value(e) } };
+			reg.clear;
+		};
+		// belt and braces: whatever the bookkeeping missed inside the ladder
+		dg !? { |g| s.sendBundle(nil, [\error, 0], [\g_freeAll, g.nodeID], [\error, 1]) };
+		nil
 	};
 	Event.addEventType(\f2voice, { |server|
 		var ev = currentEnvironment;
@@ -915,16 +1385,45 @@
 		// PRESET level; without it the last cards write the out directly (legacy
 		// layout — cfgSig |sink0 respawns the pool once f2units arrives).
 		var hasSink = false;
-		var nv = ((cfg[\voices] ? 1).clip(1, 5)).asInteger;
+		// §post THE STRIP DIVIDER (docs/design/SCOPE-DECKS.md §5 stage 4,
+		// docs/wiki/Card-Chains.md "The divider"): cfg[\post] = [(id, unit,
+		// opts?, rd, wr)…] — the ON cards RIGHT of the divider, the preset's
+		// SINGLETON processors: one instance per pool, never multiplied by
+		// voices or copies, reading the SUM of every voice's (and copy's) final
+		// stage. They live in a pool-level POST GROUP after the preset's voice
+		// subgroup (pool[\post]: grp, nodes, sink, bus), with their own stage
+		// numbering (rd 0 = the post-in pair, wr -1 = the sink's input) and
+		// cfg[\postN] private post stages; cfg[\postMap] = [\id__param, \scKey
+		// …] names the PRESET-LEVEL bus of every live post param — mapped once
+		// at spawn (§post static maps, ~f2StaticMaps). Absent = no divider =
+		// today's strip exactly (the layout below changes only when hasPost).
+		var pst = cfg[\post];
+		var pstN = (cfg[\postN] ? 0).asInteger;
+		var pstMap = cfg[\postMap];
+		var hasPost = false;
+		var pstDef;
+		var nStage = 0, postFinal = 0, postOff = 0;
+		var mkPost, resArgs, cardSig, voiceGrp;
+		var nv = ((cfg[\voices] ? 1).clip(1, 16)).asInteger;
+		// §stack copies inside every voice (docs/wiki/Polyphony.md §5): a stacked
+		// voice is a GROUP of nk copies — each a plain synth, a §stack group or a
+		// §cards strip — all on one note; copy ci reads its own buses `<key>_s<ci>`.
+		var nk = ((cfg[\copies] ? 1).clip(1, 8)).asInteger;
 		var artic = cfg[\artic] ? \reattack;
 		var hasFree = (ev[\f2hasFree] ? false);
 		var voices = top[\f2Voices];
 		var poolKey;
 		var reserved = Set[\gate, \out, \i_out, \tel_bus, \i_free, \instrument, \type, \group,
-			\f2def, \f2cfg, \f2map, \f2hasFree, \f2_cid, \dur, \sustain, \legato, \delta,
+			\f2def, \f2cfg, \f2map, \f2hasFree, \f2_cid, \f2lane, \dur, \sustain, \legato, \delta,
 			\addAction, \server, \callback, \finish, \sendGate, \selfFree, \id, \play, \parent, \buf];
-		var mkVoice, pool, voice, idx, myGen, setA, susBeats, durB, cfgSig, gateOff, vgrp;
+		var mkVoice, mkOne, pool, voice, idx, myGen, setA, susBeats, durB, cfgSig, gateOff, vgrp;
 		var offAtA, nowT, stillOpen, holdCont, respawned;
+		// §steal-x a hold onset landing on an OPEN voice of ANOTHER lane (see the
+		// LIMITS of §hold-note): the new note attacks, the stolen one is cut
+		var stealX = false;
+		// §hold-note the boundary tolerance (seconds), the ending-voice finder, the
+		// deferred-retire flag and the continued voice it names (see §hold-retire)
+		var holdTol, endingV, deferHold = false, contIdx, holdHow;
 		// one warning per key (~f2UnitWarnOnce when f2units is loaded, else a plain post)
 		var warnOnce = { |key, msg|
 			if (top[\f2UnitWarnOnce].notNil) { top[\f2UnitWarnOnce].(key, msg) } { msg.postln };
@@ -959,6 +1458,15 @@
 			chn = [];
 		};
 		hasSink = chn.notNil and: { SynthDescLib.global.at(\f2chainOut).notNil };
+		// §post a divider needs the output node (the post group's sink IS
+		// \f2chainOut): in the legacy layout (f2units not loaded) the post cards
+		// are skipped, warned once, and cfgSig |sink0 respawns the pool with them
+		// once f2units arrives.
+		hasPost = hasSink and: { pst.isArray };
+		if (chn.notNil and: { pst.isArray } and: { hasSink.not }) {
+			warnOnce.(("post_nosink_" ++ def.asString).asSymbol,
+				"⚠ [f2 post] %: the strip has a divider but f2units is NOT loaded — its post cards are skipped until then".format(def));
+		};
 
 		if (stk.notNil and: { chn.isNil }) {
 			ctrl = [\gate, \t_trig, \freq, \out, \buf];
@@ -997,6 +1505,38 @@
 					// legacy layout only: the last card owns the plain names
 					if (hasSink.not and: { c[\id] == outId }) { ctrl = ctrl ++ ud.controlNames };
 				};
+			};
+			// the stage count of the voice part (hoisted from mkOne: the post
+			// group needs it for the bus size too): the stage bus covers every
+			// slot a card names, even if chainN lags
+			nStage = (cfg[\chainN] ? 0).asInteger;
+			chn.do { |c|
+				nStage = nStage.max((c[\rd] ? (-1)).asInteger + 1).max((c[\wr] ? (-1)).asInteger + 1);
+			};
+			// §post the post cards' defs (variants like the cards', resolved
+			// through ~f2UnitDef — the base def until the variant is built, the
+			// fingerprint |p respawns the pool then) and the POOL-LEVEL PAIRS at
+			// the FRONT of the stage bus: pair 0 = the post-in (the sum of every
+			// voice's final stage), pairs 1..postFinal-1 = the private post stages,
+			// pair postFinal = the sink's input — the chain convention (the sink of
+			// a strip reads slot chainN): postN with k post cards is k, card i reads
+			// i and writes i + 1, the last writes -1 = post slot postN; the max over
+			// the slots the cards name covers a postN that lags (as nStage does).
+			// The post-in itself when every card right of the divider is bypassed.
+			// postOff = how many pairs the per-voice stages are moved back by.
+			// Post params are NOT in the ctrl union: they never ride an
+			// event (the core delivers them on the preset-level key, §post static
+			// maps), so nothing in the set/map loops addresses a post node.
+			if (hasPost) {
+				pstDef = IdentityDictionary.new;
+				pst.do { |c|
+					var udef = if (c[\opts].notNil and: { top[\f2UnitDef].notNil })
+						{ top[\f2UnitDef].(c[\unit], c[\opts]) ? c[\unit] } { c[\unit] };
+					pstDef[c[\id]] = udef;
+					pstN = pstN.max((c[\rd] ? 0).asInteger + 1).max((c[\wr] ? (-1)).asInteger + 1);
+				};
+				postFinal = if (pst.size > 0) { pstN } { 0 };
+				postOff = postFinal + 1;
 			};
 		};
 		if (grp.isKindOf(Node).not) { grp = s.defaultGroup };   // not a Node → the server's default group
@@ -1050,7 +1590,221 @@
 			grp
 		};
 
-		mkVoice = { |vi = 0|
+		// §cards the RESOURCE arguments of a card (buffers, never knobs), shared
+		// by the strip cards (mkOne) and the post cards (mkPost, §post): the
+		// same card resolves the same buffers on either side of the divider.
+		resArgs = { |c, uc|
+			var ra = [];
+			var cbuf, sres;
+			// §smp a card's own RESOURCE opt `sample` wins over the preset
+			// buffer (~f2SmpBuf); every other card keeps today's ev[\buf].
+			cbuf = (top[\f2SmpBuf] !? { |f| f.(c[\opts]) }) ? ev[\buf];
+			if (cbuf.notNil and: { uc.includes(\buf) }) { ra = ra ++ [\buf, cbuf] };
+			// §conv-ir a convU card under `ir: sample` reads a PREPARED spectrum
+			// buffer, not the sample itself (PartConv takes no sound file), so its
+			// resource opts resolve through their own cache exactly as the
+			// sampler's analyses do. Pending or unreadable ⇒ the null IR, and the
+			// card passes the source through its wet path rather than dropping out.
+			if (uc.includes(\irBuf) and: { top[\f2ConvIrRes].notNil }) {
+				ra = ra ++ [\irBuf, top[\f2ConvIrRes].(c[\opts])];
+			};
+			// §curve the DRAWN POINT LIST (POLYMER.md §6.8, ENVELOPE.md §2.9):
+			// `curve` names a RENDERED BUFFER PAIR and no graph, so it resolves
+			// here exactly as `irSample` does — one 16384-sample cycle becomes the
+			// 12-level mip bank `osc: scrawl` reads (`curveBuf`, the BASE of a
+			// consecutive range) and the 16385-frame shape `env: segments` reads
+			// (`shapeBuf`). Both are engine args and never knobs, so no card's
+			// control budget moves. An empty `curve` is the schema default and
+			// reads the DEFAULT DRAWING, not buffer 0 — a card nobody has drawn on
+			// sounds. The key handed over is `<preset>|<card>`: the cache is keyed
+			// on the drawing itself (two cards on one curve share one bank), and
+			// this names the card whose voices ~f2CurveSwap moves when a render
+			// that was still in flight at spawn lands.
+			if (top[\f2CurveRes].notNil
+				and: { uc.includes(\shapeBuf) or: { uc.includes(\curveBuf) } }) {
+				var cres = top[\f2CurveRes].(c[\opts],
+					(def.asString ++ "|" ++ c[\id].asString).asSymbol);
+				if (uc.includes(\curveBuf)) { ra = ra ++ [\curveBuf, cres[\curveBuf]] };
+				if (uc.includes(\shapeBuf)) { ra = ra ++ [\shapeBuf, cres[\shapeBuf]] };
+			};
+			// §smp the other RESOURCE opts (SAMPLER.md §6): `slicing slices beatLen
+			// onsetSens pitchSens bpm` name an ANALYSIS, not a graph, so they resolve
+			// to the slice-table buffer here exactly as `sample` resolves to `buf`.
+			// The entry owns that bufnum for the life of the sample — a re-analysis
+			// refills the table IN PLACE, so a note already sounding follows the new
+			// grid and the pool has nothing to respawn for. `bpm: manual` reads the
+			// card's own smpBpm knob ([RN] Automatic BPM Detection off): a live control
+			// cannot key an analysis, so its value at spawn keys the entry instead.
+			if (uc.includes(\sliceBuf) and: { top[\f2SmpRes].notNil }) {
+				sres = top[\f2SmpRes].(c[\opts], cbuf,
+					ev[(c[\id].asString ++ "__smpBpm").asSymbol]);
+				if (sres.notNil) {
+					ra = ra ++ [\sliceBuf, sres[\sliceBuf]];
+					// §4 the pitch curve of the FILE, when this card asked for one
+					// (`rootMode: analyzed`). -1 until the offline pass lands, and
+					// the graph then reads the manual root — so a note played in
+					// that window sounds, it just does not track yet.
+					if (uc.includes(\pitchBuf)) {
+						ra = ra ++ [\pitchBuf, (sres[\pitchBuf] ? -1)];
+					};
+					// §7 the two artefacts Spectral reads and nothing else does
+					// (SAMPLER.md §6): the onset table Preserve Onsets asks «am I
+					// on a transient» of, and the file's FFT frames. Both are -1
+					// until their pass lands — the graph then behaves as if the
+					// switch were off, and a spectral voice whose frames are not
+					// there yet stays SILENT for that note rather than handing
+					// PV_BufRd a bufnum that is not an analysis.
+					if (uc.includes(\onsetBuf)) {
+						ra = ra ++ [\onsetBuf, (sres[\onsetBuf] ? -1)];
+					};
+					if (uc.includes(\fftBuf)) {
+						ra = ra ++ [\fftBuf, (sres[\fftBuf] ? -1)];
+					};
+				};
+			};
+			ra
+		};
+		// §cards one card's part of the pool fingerprint (cfgSig |c and |p):
+		// id:unit:opts:rd:wr (opts = sorted k=v pairs; "@variant" once the
+		// variant def is BUILT — until then the base def is spawned and the pool
+		// respawns when the variant exists). `defs` is the id → resolved def
+		// cache of that side of the divider (chnDef / pstDef).
+		cardSig = { |c, defs|
+			var udef = (defs !? { defs[c[\id]] }) ? c[\unit];
+			c[\id].asString ++ ":" ++ c[\unit].asString ++ ":"
+			++ (c[\opts] !? { |o| o.keys.asArray.collect(_.asString).sort.collect { |kk|
+				kk ++ "=" ++ (o[kk.asSymbol] ? o[kk]).asString }.join(",") } ? "")
+			++ ":" ++ (c[\rd] ? (-1)).asString ++ ":" ++ (c[\wr] ? (-1)).asString
+			++ (if (udef != c[\unit]) { "@" ++ udef.asString } { "" })
+		};
+		// §post the GROUP of a voice (mkOne's strip group, mkVoice's copies
+		// group): the tail of `par` — the preset's §loop-order subgroup, which the
+		// post group follows (Group.after(vgrp)), so a voice respawned later still
+		// executes before it. In the §loop-order FALLBACK the voices spawn straight
+		// into the pattern group (par === grp) and the post group sits at ITS
+		// tail: a voice added to the tail then would come AFTER the post group —
+		// its final stage read a cycle before it is written, i.e. lost — so with a
+		// live post group the voice group goes right BEFORE it instead.
+		voiceGrp = { |par|
+			if (hasPost and: { par === grp } and: { pool.notNil } and: { pool[\post].notNil }
+				and: { pool[\post][\grp].isPlaying }) {
+				Group.before(pool[\post][\grp])
+			} {
+				Group.new(par, \addToTail)
+			}
+		};
+		// §post THE POOL'S POST GROUP — built once per pool (after the voices,
+		// when hasPost) and freed with it (the soft retire below, the scene stop
+		// in ~f2FreeSceneVoices; a hush takes it with the pattern group). One
+		// Group.after(vgrp): AFTER the preset's voice subgroup, so a voice
+		// respawned later (\addToTail inside vgrp) still executes before it. In
+		// it, in strip order, one Synth per post card — its SynthDef variant
+		// like a card's (pstDef), i_free 0 (it never self-frees: it plays for
+		// the pool, not for a note), gate 1 (a processor reading a stage runs
+		// env = 1 anyway — §cards in f2units), chainIn = its rd pair (0 = the
+		// post-in, the sum of every voice's final stage), out = its wr pair or
+		// the sink's input, the same resource buffers as a card (resArgs), port
+		// inputs on SLOT 0 (~f2PortInSlot.(pn, 0) — one instance, the writer's
+		// pair 0), telId on the LAST post card (it is the strip's output card).
+		// LAST, the sink \f2chainOut: the final post pair → the preset's out (a
+		// port writer's slot 0, ~f2PortOutSlot.(po, 0) — the SUMMED signal into
+		// slot 0 — else this event's rack bus) × the preset level (pool[\postOut]
+		// / pool[\postAmp] follow the events, see §node-bus below). Then the
+		// STATIC MAPS: every (id__param, key) of cfg[\postMap] whose node has
+		// the param is mapped onto ~mbAt.(key) — the preset-level bus the core
+		// writes — and registered in ~f2StaticMaps so the smoother created
+		// later for that key takes the mapping with it (~f2SmoothHook). Units
+		// with \tempo follow the tempo bus. Returns the proxy (grp, nodes, sink,
+		// bus) the pool stores in pool[\post]; nil when the stage bus could not
+		// be allocated (§bus-guard: the voices then write the out directly and
+		// the next event tries again).
+		mkPost = {
+			var pg, nodes = IdentityDictionary.new, nodeCtl = IdentityDictionary.new, sink, sb, pamp, pout;
+			var po = cfg[\portOut], pins = cfg[\portIns];
+			var pslot = { |j| sb.index + (2 * j) };
+			sb = top[\f2StackBusAt].(poolKey, (nStage * nv * nk) + postOff);
+			if (sb.isNil) { nil } {
+				// (§loop-order fallback, vgrp === grp: the tail of the pattern group —
+				// voiceGrp then spawns every later voice group before it)
+				pg = if (vgrp === grp) { Group.new(grp, \addToTail) } { Group.after(vgrp) };
+				pg.register(true);
+				pst.do { |c, pdi|
+					var udef = (pstDef !? { pstDef[c[\id]] }) ? c[\unit];
+					var ud = SynthDescLib.global.at(udef);
+					var uc = if (ud.notNil) { ud.controlNames } { [] };
+					var rd = (c[\rd] ? 0).asInteger.max(0), wr = (c[\wr] ? (-1)).asInteger;
+					var ua = [\out, pslot.(if (wr < 0) { postFinal } { wr }), \gate, 1, \tel_bus, (ev[\tel_bus] ? 0)];
+					if (uc.includes(\chainIn)) {
+						ua = ua ++ [\chainIn, pslot.(rd)];
+					} {
+						if (ud.notNil) {
+							warnOnce.(("chainIn_" ++ udef.asString).asSymbol,
+								"⚠ [f2 post] %: post card % (%) reads post stage % but has no chainIn — stream dropped".format(def, c[\id], udef, rd));
+						};
+					};
+					if (uc.includes(\i_free)) { ua = ua ++ [\i_free, 0] };
+					ua = ua ++ resArgs.(c, uc);
+					if (pins.notNil and: { top[\f2PortInSlot].notNil }) {
+						var pre = c[\id].asString ++ "__";
+						pins.keysValuesDo { |k, pn|
+							var ks = k.asString;
+							if (ks.beginsWith(pre)) {
+								var an = ks.copyToEnd(pre.size).asSymbol;
+								if (uc.includes(an)) { ua = ua ++ [an, top[\f2PortInSlot].(pn, 0)] };
+							};
+						};
+					};
+					if (cfg[\telId].notNil and: { pdi == (pst.size - 1) } and: { uc.includes(\telId) }) {
+						ua = ua ++ [\telId, cfg[\telId]];
+					};
+					if (ud.notNil) {
+						var n = Synth(udef, ua, pg, \addToTail);
+						n.register(true);
+						nodes[c[\id]] = tempoMap.(n, uc);
+						nodeCtl[c[\id]] = uc;
+					} {
+						// §cut as for a card: name the unit, the preset and the card, once
+						if (top[\f2UnitGone].notNil) {
+							top[\f2UnitGone].(c[\unit], def, c[\id]);
+						} {
+							("⚠ [f2 post] %: post card % has no SynthDef % — card skipped, and everything after it is silent".format(def, c[\id], udef)).postln;
+						};
+					};
+				};
+				pamp = ev[\amp];
+				if (pamp.isNumber.not) { pamp = 1 };
+				pout = if (po.notNil and: { top[\f2PortOutSlot].notNil }) { top[\f2PortOutSlot].(po, 0) } { ev[\out] ? 0 };
+				sink = Synth(\f2chainOut, [\in, pslot.(postFinal), \out, pout, \amp, pamp], pg, \addToTail);
+				sink.register(true);
+				// the static maps (top.use: ~mb/~mbSm live inside ~mbAt)
+				if (pstMap.notNil) {
+					top.use {
+						pstMap.pairsDo { |pk, key|
+							var ks = pk.asString, i = ks.find("__"), id, an, n, b;
+							if (i.notNil and: { i > 0 }) {
+								id = ks.copyFromStart(i - 1).asSymbol;
+								an = ks.copyToEnd(i + 2).asSymbol;
+								n = nodes[id];
+							};
+							// a param the node's def declares (nodeCtl); an id without a
+							// node (a skipped card) or an unknown param is dropped silently
+							if (n.notNil and: { (nodeCtl[id] ? []).includes(an) }) {
+								b = ~mbAt.(key.asSymbol);
+								if (b.notNil) {
+									n.map(an, b.index);
+									top[\f2StaticMapAdd].(key.asSymbol, n, an, pg);
+								};
+							};
+						};
+					};
+				};
+				(grp: pg, nodes: nodes, sink: sink, bus: sb)
+			}
+		};
+		// §stack mkOne builds ONE copy (ci) of voice vi under `par` — the preset
+		// subgroup for a plain voice, the copy group of a stacked one. mkVoice
+		// (below the builder) is what the pool calls.
+		mkOne = { |vi = 0, ci = 0, par|
 			var a = [\out, (ev[\out] ? 0), \tel_bus, (ev[\tel_bus] ? 0), \gate, 0];
 			var po = cfg[\portOut], pins = cfg[\portIns];
 			var sy;
@@ -1079,17 +1833,17 @@
 			// the output unit (vi 0), buf to every unit that has it. The returned
 			// proxy is what the pool stores; see ~f2VSet/~f2VMap/~f2VNode.
 			if (stk.notNil and: { chn.isNil }) {
-				var vg = Group.new(vgrp, \addToTail);
+				var vg = Group.new(par, \addToTail);
 				var nodes = IdentityDictionary.new;
 				var srcIds = [], srcSlot = IdentityDictionary.new;
 				var outId = cfg[\stackOut];
 				var sb;
 				stk.do { |u| (u[\ins] ? ()).keysValuesDo { |an, src|
 					if (srcIds.includes(src).not) { srcIds = srcIds.add(src) } } };
-				sb = top[\f2StackBusAt].(poolKey, srcIds.size * nv);
+				sb = top[\f2StackBusAt].(poolKey, srcIds.size * nv * nk);   // §stack × copies
 				// §bus-guard the same insurance as in the chain branch: an empty bus pool must not
 				// kill the event (an error inside Event:play breaks the pattern's stream forever).
-				srcIds.do { |id, si| srcSlot[id] = if (sb.isNil) { a[1] } { sb.index + (2 * ((si * nv) + vi)) } };
+				srcIds.do { |id, si| srcSlot[id] = if (sb.isNil) { a[1] } { sb.index + (2 * ((((si * nv) + vi) * nk) + ci)) } };
 				vg.register(true);
 				stk.do { |u|
 					var ud = SynthDescLib.global.at(u[\unit]);
@@ -1114,7 +1868,7 @@
 							};
 						};
 					};
-					if (cfg[\telId].notNil and: { vi == 0 } and: { u[\id] == outId } and: { uc.includes(\telId) }) {
+					if (cfg[\telId].notNil and: { vi == 0 } and: { ci == 0 } and: { u[\id] == outId } and: { uc.includes(\telId) }) {
 						ua = ua ++ [\telId, cfg[\telId]];
 					};
 					if (ud.notNil) {
@@ -1156,20 +1910,26 @@
 			// every card that has it. Every node is registered (liveness,
 			// ~f2VPlaying) and units with \tempo are mapped onto the tempo bus.
 			// The proxy has the stack shape (+ sink), so every pool site works as is.
+			// §post WITH A DIVIDER (hasPost) the voice holds the LEFT cards only:
+			// the final stage (wr -1) of every voice and copy is ONE shared pair —
+			// the post-in, pair 0 of the stage bus, where the voices sum — and the
+			// per-voice stages sit postOff pairs further back; there is NO sink in
+			// the voice group (the pool's post group has the one sink, mkPost) and
+			// no left card takes telId (the strip's output card is the last post
+			// card). Without a divider the layout is byte for byte the old one.
 			if (chn.notNil and: { stk.isNil }) {
-				var vg = Group.new(vgrp, \addToTail);
+				var vg = voiceGrp.(par);   // §post before a live post group in the §loop-order fallback
 				var nodes = IdentityDictionary.new;
-				var outId = if (chn.size > 0) { chn.last[\id] } { nil };
-				var nStage = (cfg[\chainN] ? 0).asInteger;
+				var outId = if (chn.size > 0 and: { hasPost.not }) { chn.last[\id] } { nil };
 				var sb, slot, sink, pamp;
-				// the stage bus covers every slot a card names, even if chainN lags
-				chn.do { |c|
-					nStage = nStage.max((c[\rd] ? (-1)).asInteger + 1).max((c[\wr] ? (-1)).asInteger + 1);
-				};
 				if (hasSink) {
-					sb = top[\f2StackBusAt].(poolKey, (nStage + 1) * nv);   // + the final stage
+					// + the final stage; §stack × copies. §post: the per-voice stages
+					// plus the pool-level pairs at the front (the shared final stage
+					// among them) — the same count mkPost asks for, so both get one bus
+					sb = top[\f2StackBusAt].(poolKey,
+						if (hasPost) { (nStage * nv * nk) + postOff } { (nStage + 1) * nv * nk });
 				} {
-					if (nStage > 0) { sb = top[\f2StackBusAt].(poolKey, nStage * nv) };
+					if (nStage > 0) { sb = top[\f2StackBusAt].(poolKey, nStage * nv * nk) };
 				};
 				// §bus-guard the stage bus may have FAILED to allocate (the server's audio bus pool
 				// is empty — ~f2StackBusAt has already said so out loud and, unlike the old
@@ -1179,18 +1939,29 @@
 				// write straight to the output (a sum instead of a chain), the sink is not spawned
 				// (it would be reading its own output), the note lives, and the first trigger after
 				// the buses come back assembles the strip properly.
-				slot = { |k| if (sb.isNil) { a[1] } { sb.index + (2 * ((k * nv) + vi)) } };
+				slot = { |k| if (sb.isNil) { a[1] } {
+					if (hasPost) {
+						// §post the final stage is the shared post-in pair; a private
+						// stage sits behind the postOff pool-level pairs
+						if (k >= nStage) { sb.index } { sb.index + (2 * (postOff + ((((k * nv) + vi) * nk) + ci))) }
+					} {
+						sb.index + (2 * ((((k * nv) + vi) * nk) + ci))
+					}
+				} };
 				vg.register(true);
-				// `ci` — the card's index in the compiled strip: the playhead
-				// telemetry below rides on it (SAMPLER.md §3.3), nothing else reads it
-				chn.do { |c, ci|
+				// `cdi` — the card's index in the compiled strip: the playhead
+				// telemetry below rides on it (SAMPLER.md §3.3), nothing else reads
+				// it. It is NOT `ci`: that is mkOne's COPY index, and shadowing it here
+				// made the telemetry guard below test the card instead of the copy —
+				// a multi-card strip never handed telId to its last card, and every
+				// copy of a stacked strip sent telemetry (channel flutter).
+				chn.do { |c, cdi|
 					var udef = (chnDef !? { chnDef[c[\id]] }) ? c[\unit];
 					var ud = SynthDescLib.global.at(udef);
 					var uc = if (ud.notNil) { ud.controlNames } { [] };
 					var rd = (c[\rd] ? (-1)).asInteger, wr = (c[\wr] ? (-1)).asInteger;
 					var uout = if (wr < 0) { if (hasSink) { slot.(nStage) } { a[1] } } { slot.(wr) };
 					var ua = [\out, uout, \gate, 0, \tel_bus, (ev[\tel_bus] ? 0)];
-					var cbuf, sres;
 					if (rd >= 0) {
 						if (uc.includes(\chainIn)) {
 							ua = ua ++ [\chainIn, slot.(rd)];
@@ -1204,72 +1975,9 @@
 						};
 					};
 					if (uc.includes(\i_free)) { ua = ua ++ [\i_free, 0] };
-					// §smp a card's own RESOURCE opt `sample` wins over the preset
-					// buffer (~f2SmpBuf); every other card keeps today's ev[\buf].
-					cbuf = (top[\f2SmpBuf] !? { |f| f.(c[\opts]) }) ? ev[\buf];
-					if (cbuf.notNil and: { uc.includes(\buf) }) { ua = ua ++ [\buf, cbuf] };
-					// §conv-ir a convU card under `ir: sample` reads a PREPARED spectrum
-					// buffer, not the sample itself (PartConv takes no sound file), so its
-					// resource opts resolve through their own cache exactly as the
-					// sampler's analyses do. Pending or unreadable ⇒ the null IR, and the
-					// card passes the source through its wet path rather than dropping out.
-					if (uc.includes(\irBuf) and: { top[\f2ConvIrRes].notNil }) {
-						ua = ua ++ [\irBuf, top[\f2ConvIrRes].(c[\opts])];
-					};
-					// §curve the DRAWN POINT LIST (POLYMER.md §6.8, ENVELOPE.md §2.9):
-					// `curve` names a RENDERED BUFFER PAIR and no graph, so it resolves
-					// here exactly as `irSample` does — one 16384-sample cycle becomes the
-					// 12-level mip bank `osc: scrawl` reads (`curveBuf`, the BASE of a
-					// consecutive range) and the 16385-frame shape `env: segments` reads
-					// (`shapeBuf`). Both are engine args and never knobs, so no card's
-					// control budget moves. An empty `curve` is the schema default and
-					// reads the DEFAULT DRAWING, not buffer 0 — a card nobody has drawn on
-					// sounds. The key handed over is `<preset>|<card>`: the cache is keyed
-					// on the drawing itself (two cards on one curve share one bank), and
-					// this names the card whose voices ~f2CurveSwap moves when a render
-					// that was still in flight at spawn lands.
-					if (top[\f2CurveRes].notNil
-						and: { uc.includes(\shapeBuf) or: { uc.includes(\curveBuf) } }) {
-						var cres = top[\f2CurveRes].(c[\opts],
-							(def.asString ++ "|" ++ c[\id].asString).asSymbol);
-						if (uc.includes(\curveBuf)) { ua = ua ++ [\curveBuf, cres[\curveBuf]] };
-						if (uc.includes(\shapeBuf)) { ua = ua ++ [\shapeBuf, cres[\shapeBuf]] };
-					};
-					// §smp the other RESOURCE opts (SAMPLER.md §6): `slicing slices beatLen
-					// onsetSens pitchSens bpm` name an ANALYSIS, not a graph, so they resolve
-					// to the slice-table buffer here exactly as `sample` resolves to `buf`.
-					// The entry owns that bufnum for the life of the sample — a re-analysis
-					// refills the table IN PLACE, so a note already sounding follows the new
-					// grid and the pool has nothing to respawn for. `bpm: manual` reads the
-					// card's own smpBpm knob ([RN] Automatic BPM Detection off): a live control
-					// cannot key an analysis, so its value at spawn keys the entry instead.
-					if (uc.includes(\sliceBuf) and: { top[\f2SmpRes].notNil }) {
-						sres = top[\f2SmpRes].(c[\opts], cbuf,
-							ev[(c[\id].asString ++ "__smpBpm").asSymbol]);
-						if (sres.notNil) {
-							ua = ua ++ [\sliceBuf, sres[\sliceBuf]];
-							// §4 the pitch curve of the FILE, when this card asked for one
-							// (`rootMode: analyzed`). -1 until the offline pass lands, and
-							// the graph then reads the manual root — so a note played in
-							// that window sounds, it just does not track yet.
-							if (uc.includes(\pitchBuf)) {
-								ua = ua ++ [\pitchBuf, (sres[\pitchBuf] ? -1)];
-							};
-							// §7 the two artefacts Spectral reads and nothing else does
-							// (SAMPLER.md §6): the onset table Preserve Onsets asks «am I
-							// on a transient» of, and the file's FFT frames. Both are -1
-							// until their pass lands — the graph then behaves as if the
-							// switch were off, and a spectral voice whose frames are not
-							// there yet stays SILENT for that note rather than handing
-							// PV_BufRd a bufnum that is not an analysis.
-							if (uc.includes(\onsetBuf)) {
-								ua = ua ++ [\onsetBuf, (sres[\onsetBuf] ? -1)];
-							};
-							if (uc.includes(\fftBuf)) {
-								ua = ua ++ [\fftBuf, (sres[\fftBuf] ? -1)];
-							};
-						};
-					};
+					// the card's RESOURCE arguments (buffers: sample, IR, curve, slice
+					// tables) — resArgs above, shared with the post cards of §post
+					ua = ua ++ resArgs.(c, uc);
 					if (pins.notNil and: { top[\f2PortInSlot].notNil }) {
 						var pre = c[\id].asString ++ "__";
 						pins.keysValuesDo { |k, pn|
@@ -1289,11 +1997,13 @@
 					// would share one bucket of heads.
 					// Every other card keeps today's rule exactly: telId goes to the
 					// LAST card of voice 0 alone, or the `sc:<dk>` level channel would
-					// flutter between voices.
-					if (cfg[\telId].notNil and: { uc.includes(\telId) }) {
+					// flutter between voices. §stack copy 0 alone (ci is mkOne's copy
+					// index): the layers of one voice play one note and must not
+					// interleave one channel.
+					if (cfg[\telId].notNil and: { ci == 0 } and: { uc.includes(\telId) }) {
 						if (uc.includes(\vi)) {
 							ua = ua ++ [\telId, cfg[\telId], \vi, vi];
-							if (uc.includes(\ci)) { ua = ua ++ [\ci, ci] };
+							if (uc.includes(\ci)) { ua = ua ++ [\ci, cdi] };
 						} {
 							if (vi == 0 and: { c[\id] == outId }) { ua = ua ++ [\telId, cfg[\telId]] };
 						};
@@ -1318,14 +2028,16 @@
 						};
 					};
 				};
-				if (hasSink and: { sb.notNil }) {   // §bus-guard without a stage bus there is no sink
+				// §bus-guard without a stage bus there is no sink; §post with a
+				// divider the sink is the pool's (mkPost), not the voice's
+				if (hasSink and: { sb.notNil } and: { hasPost.not }) {
 					// the output node, LAST in the group: final stage → resolved out × preset level
 					pamp = ev[\amp];
 					if (pamp.isNumber.not) { pamp = 1 };
 					sink = Synth(\f2chainOut, [\in, slot.(nStage), \out, a[1], \amp, pamp], vg, \addToTail);
 					sink.register(true);
 				};
-				sy = (grp: vg, nodes: nodes, out: outId, sink: sink);
+				sy = (grp: vg, nodes: nodes, out: outId, sink: sink, post: hasPost);
 			};
 			if (stk.isNil and: { chn.isNil } and: { pins.notNil } and: { top[\f2PortInSlot].notNil }) {
 				pins.keysValuesDo { |argName, pn|
@@ -1334,17 +2046,32 @@
 			};
 			// §synth-mod telemetry: an `sc:*` channel is written by ONE voice of the preset (vi=0),
 			// otherwise the voices' values would interleave (channel flutter).
-			if (cfg[\telId].notNil and: { vi == 0 } and: { ctrl.includes(\telId) }) {
+			if (cfg[\telId].notNil and: { vi == 0 } and: { ci == 0 } and: { ctrl.includes(\telId) }) {
 				a = a ++ [\telId, cfg[\telId]];
 			};
 			// §loop-order into ITS OWN subgroup, at the tail: a preset's voices go by vi and the
 			// subgroups by defKey ⇒ the full node order is reproducible whatever the onset order.
 			if (stk.isNil and: { chn.isNil }) {
-				sy = Synth(instr, a, vgrp, \addToTail);
+				sy = Synth(instr, a, par, \addToTail);
 				sy.register(true);   // assumePlaying=true: a fresh voice is «alive» (isPlaying) at once, not dead until /n_go
 				tempoMap.(sy, ctrl);
 			};
 			sy;
+		};
+		// §stack a voice = one copy (nk 1: the node itself, exactly as before) or a
+		// GROUP of nk copies at the tail of the preset subgroup — the proxy
+		// (grp:, copies: [...]) the accessors demux: set/gate/freq to every copy,
+		// map copy ci to `<key>_s<ci>`, nodeID = the group, alive = every copy alive.
+		mkVoice = { |vi = 0|
+			if (nk <= 1) {
+				mkOne.(vi, 0, vgrp)
+			} {
+				var vg = voiceGrp.(vgrp);   // §post before a live post group in the §loop-order fallback
+				var cps;
+				vg.register(true);
+				cps = Array.fill(nk, { |ci| mkOne.(vi, ci, vg) });
+				(grp: vg, copies: cps)
+			}
 		};
 
 		// the pool: the GROUP is compared by IDENTITY (===), not only by the nodeID in the key —
@@ -1360,8 +2087,9 @@
 		//   sees). Snapshot diverged → silence ALL nodes of the old pool by nodeID (the «no such
 		//   node» error is suppressed: the group may already have taken them) and rebuild the pool.
 		// §cfg-sig the snapshot is EVERYTHING that is baked into the spawn arguments (see mkVoice):
-		// the instrument, the output route (the portOut slot OR the ev[\out] bus), the port inputs,
-		// telId, the sample buffer. It used to hold voices|artic only — so a change of routing
+		// the instrument, the output route (the portOut slot — the rack bus ev[\out] is NOT part of
+		// it any more, see §node-bus below), the port inputs, telId, the sample buffer. It used to
+		// hold voices|artic only — so a change of routing
 		// (outBus → an «internal» port, a different port, a different fx bus, a change of the
 		// preset's synth) honestly went through a structural redeploy and updated ~f2ReuseCfg, but
 		// the pool's LIVE voices were not recreated (the snapshot matched) and went on writing to
@@ -1369,11 +2097,25 @@
 		// change) — «I changed the output and it still sounds the old way; it applied on the Nth
 		// restart of everything». Now any shift of the spawn config recreates the pool on the first
 		// trigger after the redeploy.
-		// Deliberately NOT caught: a port input's slot also depends on the WRITER's wv at the
-		// moment of the spawn — fixed by changing the writer's own voices (which respawns it).
+		// §port-wv a port input's slot bakes `vi % wv` of the WRITER at spawn time
+		// (~f2PortInSlot), so the current wv of every port this preset reads is
+		// part of the fingerprint (|w below): a later writer deploy, or a change
+		// of the writer's voices, respawns the READER on its next trigger. It used
+		// to be left out — the reader kept the stale modulus until its own pool
+		// happened to die. The lookup goes to the registry itself, not ~f2PortAt:
+		// the fingerprint must not ensure a port as a side effect; a port not
+		// ensured yet is what mkOne will ensure with the default wv, 16.
+		// §node-bus the rack bus (ev[\out]) used to sit in |o next to the port: the
+		// voice's \out was baked at spawn, so a preset played under two tree nodes
+		// with different buses respawned its pool on every alternation. Now \out
+		// is SET per event on the output-writing node (below, after the remap),
+		// |o carries the port slot alone ("" for a direct-out preset — one
+		// respawn of every direct-out pool on the first trigger after this file
+		// is reloaded, nothing more) and the pool survives a bus change.
 		cfgSig = nv.asString ++ "|" ++ artic.asString
+			++ "|x" ++ nk.asString   // §stack copies are spawn-baked
 			++ "|s" ++ instr.asString
-			++ "|o" ++ (cfg[\portOut] ? ev[\out] ? 0).asString
+			++ "|o" ++ (cfg[\portOut] ? "").asString
 			++ "|t" ++ (cfg[\telId] ? 0).asString
 			++ "|b" ++ (ev[\buf].tryPerform(\bufnum) ? ev[\buf] ? "").asString
 			// CAREFUL: the argument is NOT named `pi` — that is the reserved constant π in sclang
@@ -1381,6 +2123,13 @@
 			++ "|i" ++ (cfg[\portIns] !? { |pins|
 				pins.keys.asArray.collect(_.asString).sort.collect { |k|
 					k ++ ":" ++ pins[k.asSymbol].asString
+				}.join(",")
+			} ? "")
+			++ "|w" ++ (cfg[\portIns] !? { |pins|
+				pins.keys.asArray.collect(_.asString).sort.collect { |k|
+					var pn = pins[k.asSymbol].asSymbol;
+					var pe = top[\f2Ports] !? { |d| d[pn] };
+					((pe !? { pe[\wv] }) ? 16).asString
 				}.join(",")
 			} ? "")
 			// §port-guard a flag for whether the port helpers existed AT SPAWN TIME (only for
@@ -1404,19 +2153,77 @@
 			// (opts = sorted k=v pairs; "@variant" once the variant def is BUILT —
 			// until then the base def is spawned and the pool respawns when the
 			// variant exists), then >chainN and the output-node layout.
-			++ (chn !? { |ch| "|c" ++ ch.collect { |c|
-				var udef = (chnDef !? { chnDef[c[\id]] }) ? c[\unit];
-				c[\id].asString ++ ":" ++ c[\unit].asString ++ ":"
-				++ (c[\opts] !? { |o| o.keys.asArray.collect(_.asString).sort.collect { |kk|
-					kk ++ "=" ++ (o[kk.asSymbol] ? o[kk]).asString }.join(",") } ? "")
-				++ ":" ++ (c[\rd] ? (-1)).asString ++ ":" ++ (c[\wr] ? (-1)).asString
-				++ (if (udef != c[\unit]) { "@" ++ udef.asString } { "" })
-			}.join(";") ++ ">" ++ (cfg[\chainN] ? 0).asString
+			++ (chn !? { |ch| "|c" ++ ch.collect { |c| cardSig.(c, chnDef) }.join(";")
+				++ ">" ++ (cfg[\chainN] ? 0).asString
 			// §cards-out the output-node layout is spawn-baked too (final stage
 			// slot + \f2chainOut vs. the legacy direct write): flips once f2units loads
-			++ (if (hasSink) { "|sink1" } { "|sink0" }) } ? "");
+			++ (if (hasSink) { "|sink1" } { "|sink0" }) } ? "")
+			// §post the divider is spawn-baked too: the post cards (same shape as
+			// |c, with their own numbering) and postN — a card moved across the
+			// divider, a post card added, bypassed or re-menued, or the divider
+			// removed, respawns the pool (and rebuilds the post group with it).
+			// A strip without a divider adds nothing here.
+			++ (pst !? { |ps| "|p" ++ ps.collect { |c| cardSig.(c, pstDef) }.join(";")
+				++ ">" ++ (cfg[\postN] ? 0).asString } ? "");
 		pool = voices[poolKey];
-		if (pool.notNil and: { (pool[\grp] !== grp) or: { pool[\cfgSig] != cfgSig } }) {
+		// §hold-note the offAt bookkeeping is read BEFORE the pool decisions: the
+		// retire rule below and the voice pick both ask «is a voice of this pool
+		// ending at this boundary?». nowT is the wall clock of the language (the
+		// same clock the offAt entries are written in); holdTol is 0.08 beat in
+		// seconds — tempo-invariant, and wide enough to hold the 0.03-beat margin
+		// of a hold gate-off plus the language's scheduling jitter.
+		nowT = Main.elapsedTime;
+		holdTol = 0.08 * TempoClock.default.beatDur;
+		// the voice whose gate ENDS at this boundary: offAt within holdTol ahead of
+		// nowT (a scheduled off still pending) AND whose lane (pool[\lane][v], the
+		// f2lane of the event that last played it) equals the event's lane — see
+		// §hold-note below for the lane rule. lanes nil (a pool from before the
+		// rule) or both lanes nil (a compiler that sends no f2lane): nil == nil is
+		// true in sclang, so the old lane-agnostic behaviour is kept. Several →
+		// the nearest off. None → nil: every open voice still has time left (an
+		// overlapping note), the ending voices belong to another lane, or the
+		// pool is silent (a fresh onset).
+		endingV = { |offs, lanes, myLane|
+			var best;
+			(offs ? []).do { |t, v|
+				if ((nowT >= (t - holdTol)) and: { nowT < t }
+					and: { lanes.isNil or: { lanes[v] == myLane } }) {
+					if (best.isNil or: { t < offs[best] }) { best = v };
+				};
+			};
+			best
+		};
+		// §hold-retire DEFERRED retire on a sounding hold. The fingerprint check
+		// below fires on the first event after a structural edit (copies, voices,
+		// any cell edit). For a hold preset that event may be the CONTINUATION of
+		// a run that is sounding right now, and a respawn would re-attack it in
+		// the middle of the note. So: signature diverged AND hold AND a voice of
+		// the OLD pool is ending at this boundary (a continuation by the rule of
+		// endingV) → the old pool serves this event, marked pool[\retire] = the
+		// new signature, and stays in the old cfg (nv/nk of ITS spawn — the arrays
+		// and the copies proxies are sized by them, and mkOne must rebuild a dead
+		// voice in the old layout). The retire happens on the first event that is
+		// NOT a continuation — a fresh onset, i.e. the old note has ended. The
+		// non-hold path, a channel gate, a changed group (the old voices are
+		// corpses) and a pool from before this rule (no \nk) retire at once, as
+		// before.
+		deferHold = false;
+		if (pool.notNil and: { pool[\grp] === grp } and: { pool[\cfgSig] != cfgSig }
+			and: { artic == \hold } and: { pool[\artic] == \hold } and: { pool[\nk].notNil }
+			and: { cfg[\gateSrc].isNil }) {
+			contIdx = endingV.(pool[\offAt], pool[\lane], ev[\f2lane]);
+			// a continued voice that is DEAD has nothing to keep sounding: the
+			// §orphan-fix respawn below would rebuild it with the NEW graph (mkVoice
+			// closes over the new cfg) in the OLD layout (nv/nk of the old pool) —
+			// retire at once instead, as a fresh onset would
+			if (contIdx.notNil and: { top[\f2VPlaying].(pool[\synths][contIdx]).not }) { contIdx = nil };
+			if (contIdx.notNil) {
+				deferHold = true;
+				pool[\retire] = cfgSig;
+				nv = pool[\nv]; nk = pool[\nk];
+			};
+		};
+		if (pool.notNil and: { deferHold.not } and: { (pool[\grp] !== grp) or: { pool[\cfgSig] != cfgSig } }) {
 			// §cfg-sig SOFT retire. The old voices used to be hard-freed here (n_free
 			// mid-sound = a click on every strip / menu / routing edit). Now they get
 			// gate 0 at once and are freed 0.4 s later (the ~f2FreeSceneVoices
@@ -1432,30 +2239,186 @@
 				var nid = top[\f2VNode].(v);
 				if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_set, nid, \gate, 0], [\error, 1]) };
 			};
+			// §post the old pool's post group is freed WITH its voices, after their
+			// release — it is what they sound through for those 0.4 s (its bus is
+			// the retired entry above; the new pool's post group gets the fresh one)
 			SystemClock.sched(0.4, {
 				old[\synths].do { |v|
 					var nid = top[\f2VNode].(v);
 					if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) };
 				};
+				old[\post] !? { |p| top[\f2FreePost].value(p) };
 				nil
 			});
 			voices.removeAt(poolKey); pool = nil;
 		};
 		if (pool.isNil) {
-			pool = (synths: Array.fill(nv, { |i| mkVoice.(i) }), rr: 0, gen: Array.fill(nv, 0), grp: grp, cfgSig: cfgSig);
+			pool = (synths: Array.fill(nv, { |i| mkVoice.(i) }), rr: 0, gen: Array.fill(nv, 0), grp: grp, cfgSig: cfgSig,
+				artic: artic, nv: nv, nk: nk,   // §hold-retire the layout a deferred event must keep
+				lane: Array.fill(nv, nil),      // §hold-note the lane each voice last played
+				outAt: Array.fill(nv, ev[\out] ? 0));   // §node-bus the out each voice writes (mkOne baked this event's)
 			voices[poolKey] = pool;
 		};
-		// §hold sticking to ONE voice: a run of adjacent cells continues on the same voice — one
-		// merged gate with no retriggers (round-robin would hand the next cell to another voice,
-		// and nobody would be left to cancel the previous one's deferred gate-off).
-		if (nv <= 1) { idx = 0 } {
+		// §post the pool's post group: built once, after the voices (the same
+		// stage bus — mkOne allocated it with the pool-level pairs in front);
+		// rebuilt when its group is gone (something freed it under the pool) and
+		// retried when the stage bus could not be allocated (mkPost gave nil).
+		// pool[\postOut] / pool[\postAmp] remember what the sink was spawned
+		// with, so the per-event sets below go out only on a change. Not on a
+		// §hold-retire deferred event: that pool is the OLD one in its old
+		// layout (its cfg may have had no divider at all), and a post group
+		// built now would ask ~f2StackBusAt for a different pair count — the
+		// bus under the sounding voices would be reallocated. The retire that
+		// follows the held note builds the new pool with its post group.
+		if (hasPost and: { deferHold.not }) {
+			if (pool[\post].notNil and: { pool[\post][\grp].isPlaying.not }) {
+				top[\f2FreePost].value(pool[\post]);
+				pool[\post] = nil;
+			};
+			if (pool[\post].isNil) {
+				pool[\post] = mkPost.();
+				pool[\postOut] = ev[\out] ? 0;
+				pool[\postAmp] = if (ev[\amp].isNumber) { ev[\amp] } { 1 };
+			};
+		};
+		// §hold-note HOLD PER NOTE. A hold event CONTINUES a voice only when that
+		// voice's gate is ending at this boundary (endingV): the adjacent cell of a
+		// run arrives 0.03 beat before its predecessor's deferred gate-off, lands
+		// on the same voice, bumps gen and cancels that off — one merged gate
+		// across the run. Otherwise it is a NEW note and takes the round-robin
+		// voice exactly as reattack does: an overlapping hold note of the same
+		// preset (a par of two blocks with different offsets, a short hold nested
+		// inside a long one) gets its own voice, its own gate front, its own pitch
+		// latch (holdCont is per voice), its own bus mapping (lastMap is per idx)
+		// and its own gate-off (gen is per idx — another voice's events never
+		// cancel it). The old rule stuck EVERY hold event of the preset to one
+		// voice (pool[\hidx]): the second onset became a continuation, the first
+		// note's off was cancelled by the gen bump, and its offAt was overwritten
+		// (a nested short note shut the long one early). pool[\hidx] survives as
+		// the last-continued voice — diagnostics only. A channel gate (gateSrc)
+		// writes no offAt, so it keeps the sticky voice: its cells carry
+		// parameters, not gates, and must keep addressing one node.
+		//
+		// THE LANE RULE. The compiler tags every cell event with f2lane = the
+		// cell's chain of par branches plus its row (a Symbol: for each ancestor
+		// container whose op is par, "/t:<containerId>:<childIndex>"; a row r ≥ 1
+		// of a multi-row block appends "/r<r>", row 0 adds nothing — it is the
+		// block's base lane, so a single-row block or a row 0 under a seq/wseq
+		// root has the empty lane, and row i of consecutive blocks in a seq is
+		// ONE lane: their touching cells continue the voice, as single-row
+		// blocks do). A continuation must match the lane:
+		// endingV only answers a voice whose lane (pool[\lane][v], written at
+		// every pick) equals the event's. Without it the two rows of one block —
+		// two parallel branches of the phase tree, cells touching at the same
+		// boundaries — zipped across voices: row 1's onset at a boundary where
+		// row 0's cell ends was taken as a continuation of row 0's voice (and
+		// vice versa), both rows' events at one boundary fought for the same
+		// ending voice, and a run hopped voices every time the other row started
+		// or ended a cell (a fresh attack + a release each hop). Now a run stays
+		// on one voice for its whole life; a cross-lane touching cell is a new
+		// note and takes a free voice (the free-voice scan is lane-agnostic: a
+		// free voice is free for anyone). A pool without \lane (built before
+		// this rule) gets the array lazily; its voices carry lane nil until they
+		// are picked again.
+		//
+		// LIMITS of the pick, by reading, not by ear:
+		// - THE STEAL. Every voice busy → the round-robin voice is taken with
+		//   its gate still open. Two cases, told apart by the lane the voice
+		//   last played (§steal-x, stealX below — read BEFORE the lane is
+		//   overwritten; nil == nil counts as the same lane):
+		//   · ANOTHER LANE's note is on it → a cross-lane steal, and the new
+		//     note sounds as a NEW note: holdCont is false, so \freq is set and
+		//     latched at this moment (and f2map maps it); the gate takes the
+		//     micro-dip re-attack (gate 0 now, gate 1 by bundle in 4 ms — the
+		//     branch reattack/legato use on an open voice); the gate-off goes
+		//     at the NEW cell's end, no max with the stolen end. The stolen
+		//     note is cut — that is the decision: the note of this moment wins
+		//     over the older one, and a harmony-bound preset latches the bus
+		//     value of its own onset. Add voices to keep both.
+		//   · THE SAME LANE (a busy voice of this lane not found by endingV, or
+		//     an old compiler sending no f2lane) → the merge, as before: gate 1
+		//     on an open gate has no edge and holdCont is true, so the new note
+		//     gets NO attack and keeps the OLD pitch latch (§h-latch v2 skips
+		//     \freq) — it only remaps the voice onto the new cell's buses and
+		//     extends the gate-off to the later end.
+		// - MONO (voices 1): idx is always 0, so every overlap lands on the open
+		//   voice and the same two cases apply — a second lane's onset is the
+		//   cross-lane steal (re-attack, fresh latch, the first note cut at the
+		//   new note's start); a same-lane overlap is the merge (no attack, no
+		//   re-latch, gate-off at the later end, the voice remapped to the new
+		//   cell's buses).
+		// - A STRUCTURAL REDEPLOY OF THE ROW (any edit that changes the compiled
+		//   structure: a cell, a block's height, the tree) never meets a stale
+		//   lane tag, because it never meets the old pool: the compiled row code
+		//   opens with ~f2FreeSceneVoices.(\<row>) (both compilers, §reuse),
+		//   which drops every pool of the row and gates its voices off AT THE
+		//   EVAL, mid-loop, while the Pdef swap waits for the loop boundary
+		//   (§sync quant). Every note of the row sounding at the edit releases
+		//   then; the next cell event of the old stream builds a fresh pool (new
+		//   synths, lane nil, a fresh latch) and re-attacks — on every lane,
+		//   whatever the articulation. So a lane renamed by the edit (a par put
+		//   above a row: "" → "/t:<id>:<i>") starts over with the pool.
+		//   A pool that outlives its row code (a cfgSig change without a row
+		//   redeploy: a writer's voices |w, a units reload |u, a variant def
+		//   |c) keeps lane tags that still match. Only a reload of THIS file
+		//   over a sounding pool built before the lane code re-attacks: its
+		//   voices get lane nil lazily, nil ≠ a Symbol, one fresh onset per
+		//   running voice, then correct.
+		// - A GAP SHORTER THAN 0.03 BEAT between two hold cells of one preset
+		//   on one lane (a rest or a foreign cell) is bridged: the off of the
+		//   first cell is still pending at the second onset, so it counts as a
+		//   continuation (the core sees two runs). See the durB floor below for
+		//   cells shorter than 0.05 beat, where the window widens.
+		//
+		// DIAGNOSTIC: topEnvironment[\f2DebugHold] = true posts one line per
+		// hold event — "[f2 hold] <poolKey> cid <f2_cid> lane <lane> voice <idx>
+		// <cont|fresh|steal> off-in <ms> respawned <bool>": cont = the voice was
+		// found by endingV, steal = every voice busy — "steal from <lane>" names
+		// the stolen lane on a cross-lane steal (§steal-x, the re-attack), "steal
+		// (merge)" is the same-lane merge —, fresh = a free voice; off-in = that
+		// voice's pending gate-off relative to now, at the moment of the decision
+		// (negative = the voice was free). Off by default; set the flag to nil
+		// to stop.
+		offAtA = pool[\offAt];
+		if (offAtA.isNil) { offAtA = Array.fill(nv, 0); pool[\offAt] = offAtA };
+		if (pool[\lane].isNil) { pool[\lane] = Array.fill(pool[\nv] ? nv, nil) };
+		holdHow = nil;
+		if (nv <= 1) {
+			idx = 0;
+			// mono: the label only (the pick is fixed); computed under the flag
+			if (artic == \hold and: { top[\f2DebugHold] == true } and: { cfg[\gateSrc].isNil }
+				and: { endingV.(offAtA, pool[\lane], ev[\f2lane]) == 0 }) { holdHow = \cont };
+		} {
 			if (artic == \hold) {
-				idx = pool[\hidx] ? 0;
-			} {
+				idx = if (cfg[\gateSrc].notNil) { pool[\hidx] ? 0 } {
+					contIdx ?? { endingV.(offAtA, pool[\lane], ev[\f2lane]) } };
+				if (idx.notNil and: { cfg[\gateSrc].isNil }) { holdHow = \cont };
+			};
+			if (idx.isNil) {
 				idx = pool[\rr]; pool[\rr] = (pool[\rr] + 1) % nv;
+				// §hold-note a fresh hold onset prefers a FREE voice (by the offAt
+				// bookkeeping), scanning round-robin from rr. On an OPEN voice the
+				// event counts as a continuation (holdCont: gate 1 on an open gate has
+				// no edge, the pitch stays latched) — the note is SWALLOWED. With a
+				// long hold sounding and short notes nested inside it, rr alternated
+				// and every other nested note vanished into the long one while a
+				// voice sat idle. Every voice busy → steal rr (the merge), as before.
+				if (artic == \hold and: { cfg[\gateSrc].isNil } and: { nowT < (offAtA[idx] ? 0) }) {
+					var k = 1;
+					while { (k < nv) and: { nowT < (offAtA[(idx + k) % nv] ? 0) } } { k = k + 1 };
+					if (k < nv) { idx = (idx + k) % nv; pool[\rr] = (idx + 1) % nv };
+				};
 			};
 		};
 		pool[\hidx] = idx;
+		// §steal-x the OLD lane of the picked voice decides: a hold onset on a
+		// voice still open by the offAt bookkeeping whose last note belongs to
+		// another lane is a cross-lane steal (a continuation found by endingV or
+		// contIdx always matches the lane, so it never trips this). Read here,
+		// before pool[\lane][idx] is overwritten below the diagnostic post.
+		stealX = (artic == \hold) and: { cfg[\gateSrc].isNil }
+			and: { nowT < (offAtA[idx] ? 0) } and: { pool[\lane][idx] != ev[\f2lane] };
+		if (holdHow.isNil) { holdHow = if (nowT < (offAtA[idx] ? 0)) { \steal } { \fresh } };
 		voice = pool[\synths][idx];
 		if (voice.isNil or: { top[\f2VPlaying].(voice).not }) {
 			// §orphan-fix before replacing, silence the previous node by nodeID: if isPlaying is
@@ -1467,7 +2430,21 @@
 			voice !? { |v| var nid = top[\f2VNode].(v);
 				if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) } };
 			voice = mkVoice.(idx); pool[\synths][idx] = voice; respawned = true;
+			// §node-bus mkOne baked this event's out into the fresh voice
+			pool[\outAt] !? { |oa| oa[idx] = ev[\out] ? 0 };
 		};
+		// §hold-note the diagnostic post (see the comment block above); the
+		// pending off is read here, before the new off is written further down,
+		// and the voice's OLD lane (the stolen one) before it is overwritten
+		if (artic == \hold and: { top[\f2DebugHold] == true }) {
+			"[f2 hold] % cid % lane % voice % % off-in % respawned %".format(
+				poolKey, ev[\f2_cid], ev[\f2lane], idx,
+				if (holdHow == \steal) {
+					if (stealX) { "steal from " ++ pool[\lane][idx].asString } { "steal (merge)" }
+				} { holdHow },
+				(((offAtA[idx] ? 0) - nowT) * 1000).round(0.1), respawned ? false).postln;
+		};
+		pool[\lane][idx] = ev[\f2lane];   // §hold-note the lane this voice now plays
 		// §gen-fix THE ROOT BUG (there since §reuse itself): `arr[i] = v` in sclang returns THE
 		// ARRAY ITSELF, not the value (the same trap documented for dict[k]=v).
 		// Because of `myGen = (pool[\gen][idx] = …)` myGen was AN ARRAY, and the gen guard
@@ -1484,13 +2461,26 @@
 		// front holds until the next real gate trigger — melody/tree changes land
 		// on the next attack, never mid-note. Only \freq is frozen; every other
 		// param keeps updating per cell as before. The offAt bookkeeping is
-		// hoisted from the articulation block below so the freq/set sections can
-		// tell a gate-opening event from a continuation.
-		offAtA = pool[\offAt];
-		if (offAtA.isNil) { offAtA = Array.fill(nv, 0); pool[\offAt] = offAtA };
-		nowT = Main.elapsedTime;
+		// hoisted from the articulation block below (and read at the pool
+		// decisions above, §hold-note) so the freq/set sections can tell a
+		// gate-opening event from a continuation. Per kind of event, for a
+		// harmony-bound preset (detunedFreq = a Pfunc reading the voice bus, a
+		// number per event): reattack and legato latch \freq at every cell; a
+		// hold fresh onset (a free voice, or another lane's onset while this
+		// lane's run continues) latches at its own moment — two lanes latched at
+		// different moments hold different pitches of the same voice's
+		// trajectory; a hold continuation keeps its onset pitch; a hold STEAL
+		// (every voice busy) is a continuation by this test and keeps the
+		// STOLEN note's pitch when the stolen note is of the SAME lane (the
+		// merge), and is a NEW note that latches at its own moment when it is of
+		// ANOTHER lane (§steal-x: stealX makes holdCont false — see the LIMITS of
+		// §hold-note above); a respawned voice is a fresh synth and latches; the
+		// §hold-retire deferred event is a continuation of the old pool and
+		// keeps; a channel-gated preset (gateSrc) never continues and latches at
+		// every cell — its gate is the bus, so the latch lands on whatever note
+		// the bus holds open.
 		stillOpen = nowT < (offAtA[idx] ? 0);
-		holdCont = (artic == \hold) and: { stillOpen }
+		holdCont = (artic == \hold) and: { stillOpen } and: { stealX.not }
 			and: { cfg[\gateSrc].isNil } and: { (respawned ? false).not };
 
 		// map the live arguments → per-cell buses (top.use: ~mb/~mbSm live inside ~mbAt)
@@ -1514,27 +2504,79 @@
 				lm = lmAll[idx];
 				if (lm.isNil) { lm = IdentityDictionary.new; lmAll[idx] = lm };
 				ev[\f2map].pairsDo { |param, key|
-					var b;
 					if (ctrl.includes(param) and: { (holdCont and: { param == \freq }).not }) {
-						b = ~mbAt.(key);
-						if (b.notNil) {
-							var prev = lm[param];
-							if (prev.notNil and: { prev.index != b.index }) {
-								try {
-									var live = prev.getSynchronous;
-									var raw = ~mbRawAt !? { ~mbRawAt.(key) } ? b;
-									raw.set(live);
-									if (raw.index != b.index) { b.set(live) };
-									dirty = dirty.add(key);
+						// §stack copy ci of a stacked voice reads `<key>_s<ci>` (Polyphony.md
+						// §6.4) — the core delivers one value per copy; a plain voice reads
+						// the key itself. The handoff below runs per copy: each remembers
+						// the bus IT was on.
+						var keys = if (nk > 1) { nk.collect { |ci| (key.asString ++ "_s" ++ ci).asSymbol } } { [key] };
+						keys.do { |kk, ci|
+							var b = ~mbAt.(kk);
+							var lmk = if (nk > 1) { (param.asString ++ "_s" ++ ci).asSymbol } { param };
+							if (b.notNil) {
+								var prev = lm[lmk];
+								if (prev.notNil and: { prev.index != b.index }) {
+									try {
+										var live = prev.getSynchronous;
+										var raw = ~mbRawAt !? { ~mbRawAt.(kk) } ? b;
+										raw.set(live);
+										if (raw.index != b.index) { b.set(live) };
+										dirty = dirty.add(kk);
+									};
+								};
+								lm[lmk] = b;
+								// §post a mapped PRESET level (`amp` in f2map) has one
+								// addressee with a divider — the pool's sink — and follows
+								// the bus of the last event (copy 0's key); the per-voice
+								// demux would drop it (no sink in the voice)
+								if (hasPost and: { param == \amp }) {
+									if (ci == 0) { pool[\post] !? { |p| p[\sink] !? { |sk| sk.map(\amp, b.index) } } };
+								} {
+									if (nk > 1) {
+										top[\f2VMap].(voice[\copies][ci], param, b.index);
+									} {
+										top[\f2VMap].(voice, param, b.index);
+									};
 								};
 							};
-							lm[param] = b;
-							top[\f2VMap].(voice, param, b.index);
 						};
 					};
 				};
 				if (dirty.notNil and: { dirty.size > 0 }) {
 					(~f2CoreAddr ? ~f2BackendAddr ? NetAddr("127.0.0.1", 57121)).sendMsg('/f2_dirty', *dirty);
+				};
+			};
+		};
+		// §node-bus THE RACK BUS PER EVENT. ev[\out] is resolved by ~enrich (the
+		// wrapper: the event's outBus — the tree node's bus, put on the event by
+		// the compilers — else the preset def's outBus, else main). mkOne baked
+		// it at spawn; from here on it is SET on the node that writes the
+		// preset's output — the strip's sink, a stack's output node, the plain
+		// synth (~f2VDemux routes a plain \out there; a copies proxy fans it to
+		// every copy) — so one preset under two tree nodes with different buses
+		// keeps its pool and moves its output with each event. pool[\outAt] is
+		// the out each voice currently writes (initialised at spawn): the set
+		// goes out only when it changes for THIS voice — a bus set on every event
+		// of every voice is exactly the traffic this avoids. A port-writing
+		// preset (cfg[\portOut]) is left alone: its out IS the port slot, taken
+		// at spawn, and ev[\out] does not apply to it — as before. \out is in
+		// the reserved set, so the static loop below never sends it.
+		// §post with a divider the ONE node that writes the preset's output is
+		// the pool's sink (pool[\post][\sink]), not a per-voice node: the bus
+		// goes there, once per change (pool[\postOut]), and the voices' outAt
+		// bookkeeping is left alone (no voice node reads it).
+		if (cfg[\portOut].isNil and: { ev[\out].notNil } and: { ctrl.includes(\out) }) {
+			if (hasPost) {
+				if (pool[\postOut] != ev[\out]) {
+					pool[\postOut] = ev[\out];
+					pool[\post] !? { |p| p[\sink] !? { |sk| sk.set(\out, ev[\out]) } };
+				};
+			} {
+				var outA = pool[\outAt];
+				if (outA.isNil) { outA = Array.fill(pool[\nv] ? nv, nil); pool[\outAt] = outA };
+				if (outA[idx] != ev[\out]) {
+					outA[idx] = ev[\out];
+					top[\f2VSet].(voice, [\out, ev[\out]]);
 				};
 			};
 		};
@@ -1555,6 +2597,14 @@
 			};
 		};
 		if (setA.size > 0) { top[\f2VSet].(voice, setA) };
+		// §post the bare PRESET level of the event goes to the pool's sink (the
+		// demux dropped it from setA — no sink in the voice), only when it
+		// changed (pool[\postAmp]); a mapped amp went through f2map above and
+		// is not a number here.
+		if (hasPost and: { ev[\amp].isNumber } and: { pool[\postAmp] != ev[\amp] }) {
+			pool[\postAmp] = ev[\amp];
+			pool[\post] !? { |p| p[\sink] !? { |sk| sk.set(\amp, ev[\amp]) } };
+		};
 		// §cell-trig per-cell onset pulse (compiler emits cellTrig only for
 		// grainU presets): fires on EVERY event of the reused voice — including
 		// hold continuations that never re-front the gate — so the tape motor
@@ -1614,12 +2664,41 @@
 			// offAtA/nowT/stillOpen live in the outer scope now (§h-latch v2 needs
 			// the gate-front decision before the freq/set sections above).
 			var beatDur = TempoClock.default.beatDur;
+			// §hold-note THE FLOOR. ev[\dur] is the cell's beat length after the
+			// ~w split (dur · w / Σw for a wseq child, dur / n for a seq), so a
+			// hold continuation is found for cells of ANY unequal lengths: the
+			// off is always durB + 0.03 beat after the onset and the next onset
+			// of the lane arrives at durB — 0.03 beat ahead of the off, inside
+			// holdTol (0.08). A cell shorter than 0.05 beat is clamped to 0.05,
+			// which moves its hold off to 0.08 beat after ITS onset instead of
+			// 0.03 after the boundary: a touching same-lane cell still cancels
+			// it (a continuation bumps gen), so no run breaks and no note is cut,
+			// but a lone sub-0.05-beat hold note sounds 0.08 beat, and a gap up
+			// to 0.08 beat minus the RAW cell length (ev[\dur], not the clamped
+			// durB) after it is bridged (0.03 for a normal cell).
+			// The clamp keeps the reattack and legato offs strictly positive.
 			durB = (ev[\dur] ? 1).max(0.05);
 			susBeats = if (artic == \hold)
 				{ durB + 0.03 }
 				{ if (artic == \legato) { (durB - 0.008).max(0.02) } { durB * (ev[\legato] ? 0.85) } };
+			// §hold-note a hold event on a voice that is still open never SHORTENS
+			// its life: the gate-off goes at the later of the two ends, and the
+			// bookkeeping says the same (offAt = max). The gen bump above cancelled
+			// the previous off, so the off has to be RESCHEDULED at the old time —
+			// a bookkeeping-only max would claim an open gate the server had shut.
+			// Continuation: the old end is 0.03 beat away, the new one wins. A
+			// same-lane steal (every voice busy) or a same-lane mono overlap: the
+			// run merges and plays out to the later end — a nested short note no
+			// longer cuts the long one. §steal-x a CROSS-LANE steal is a new note:
+			// its off goes at ITS end, the stolen note's end is dropped with the
+			// stolen note (the gen bump cancelled its off).
+			if (artic == \hold and: { stillOpen } and: { stealX.not }) {
+				susBeats = susBeats.max((offAtA[idx] - nowT) / beatDur);
+			};
 			offAtA[idx] = nowT + (susBeats * beatDur);
-			if (stillOpen and: { artic != \hold }) {
+			// §steal-x the cross-lane steal takes the micro-dip too: the voice is
+			// open on another lane's note, and 1 → 1 would be no attack
+			if (stillOpen and: { (artic != \hold) or: { stealX } }) {
 				s.sendBundle(nil,   [\error, 0], [\n_set, top[\f2VNode].(voice), \gate, 0], [\error, 1]);
 				s.sendBundle(0.004, [\error, 0], [\n_set, top[\f2VNode].(voice), \gate, 1], [\error, 1]);
 			} {

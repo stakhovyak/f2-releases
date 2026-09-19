@@ -164,13 +164,16 @@ win-tail extends the gate channel exactly as it extends a modulation window.
 
 The owner's choice was real polyphony of modular constellations:
 
-- an **audio port** is `Bus.audio(s, 2·V)`, V = the maximum voice count (5). Slot k is voice
+- an **audio port** is `Bus.audio(s, 2·V)`, V = the maximum voice count (16). Slot k is voice
   k's stereo pair.
 - **The writer**: the voice with pool index k writes into slot k (the `\portOut` argument =
   `bus.index + 2k`, set when the voice is spawned — the pool knows k).
 - **The reader**: voice k reads slot `k mod V_writer` — a deterministic pairing of
-  carrier[k] ⇄ fmMod[k]; with unequal voice counts it wraps around. Hold sticking (`hidx`)
-  keeps the pairs stable over time.
+  carrier[k] ⇄ fmMod[k]; with unequal voice counts it wraps around. A hold run stays on the
+  voice it started on (a continuation lands on the voice whose gate is ending AND whose lane
+  matches the event's, §hold-note in f2dsl.scd), which keeps the pairs stable over a run; the
+  writer's current voice count is part of the reader's pool fingerprint (`|w`), so a writer
+  change respawns the reader.
 - **kr ports** in v1 are per module (one channel), not per voice: an honest, documented
   limitation (per-voice kr channels are a v2 matter, if they are ever needed).
 - **Execution order**: units live in subgroups of the module group, topologically sorted by
@@ -392,14 +395,70 @@ InFeedback (exactly one block of delay, loops legal — the same contract as the
 §loop-cond conditioners work). The `output` node gets the stack's `\out` (ev[\out] or the
 portOut slot); the rest get their own private buses.
 
+**§node-bus — the rack bus is set per event.** ev[\out] is resolved by `~enrich` from the
+event's `outBus` (the tree node's bus, put on the cell event by the compilers), else the preset
+def's `outBus`, else main. mkOne bakes it at spawn as the initial value; after that `\f2voice`
+sends `\out` — right after the f2map remap, before the static sets — to the one node that
+writes the preset's output: `~f2VDemux` routes a plain `out` to a strip's sink (next to `amp`),
+to a stack's output node, and a plain synth takes it as any control; a copies proxy fans it to
+every copy. Card nodes never receive it (their out is a stage slot). The pool keeps
+`pool[\outAt]`, the bus each voice last wrote, and the set goes out only when the event's bus
+differs from it, so a bus that never changes costs no messages. The bus left the pool
+fingerprint (`|o` carries the portOut slot alone, "" for a direct-out preset), so a preset
+played under two tree nodes with different buses keeps its pool instead of respawning it on
+every alternation; a port-writing preset is untouched — its out is the port slot, fixed at
+spawn, and ev[\out] does not apply. Limits: in the legacy strip layout (no `\f2chainOut`)
+and when a stage bus failed to allocate, only the output node follows the per-event bus; the
+other cards that write the out directly keep the spawn-time bus.
+
 To the rest of the code a voice is a **proxy** (an Event with `set/map/isPlaying/nodeID`
 functions, the sclang doesNotUnderstand idiom): an argument with no prefix
 (`gate/t_trig/freq/out/buf`) goes to `grp.set` / `grp.map` (scsynth broadcasts n_set/n_map to
 every child; nodes without that control ignore it); `osc.x` is demultiplexed into
 `nodes[\osc].set(\x)`; `isPlaying` and `nodeID` are the group's (n_free on the group = every
-node). **Nothing else in \f2voice changes**: the pool, round robin, hidx, hold sticking,
-holdCont, §map-seed, §cell-trig, gateSrc (n_map on the group), offAt and the gate-off all work
-on top of the proxy. telId goes to the `output` node only, vi=0.
+node). **Nothing else in \f2voice changes**: the pool, round robin, the hold-per-note voice
+pick (§hold-note: a continuation takes the voice whose gate is ending and whose lane equals the
+event's, a fresh onset a free voice; `hidx` is diagnostics only), holdCont, §map-seed,
+§cell-trig, gateSrc (n_map on the group), offAt and the gate-off all work on top of the proxy.
+telId goes to the `output` node only, vi=0, copy 0.
+
+**The lane of a hold event.** The compiler tags every cell event with `f2lane`: the cell's chain
+of par branches (for each ancestor container with op par, `/t:<containerId>:<childIndex>`) plus
+its row inside a multi-row block (`/r<row>` for row ≥ 1; row 0 is the block's base lane, so a
+single-row block or a row 0 under a seq/wseq root has the empty lane, and row i of consecutive
+blocks in a seq is one lane). The pool keeps the lane each voice last played (`pool[\lane][v]`,
+written at every pick), and `endingV` only answers a voice whose lane equals the event's. Two
+rows of one block are two parallel branches whose cells touch at the same boundaries: without
+the lane condition a row's onset was taken as the continuation of the other row's ending voice,
+and a run hopped voices at every boundary the other row touched (an attack and a release per
+hop). An event without `f2lane` writes lane nil and matches nil (nil == nil in sclang), so an
+old compiler keeps the lane-agnostic pick; a pool from before the rule gets its lane array
+lazily.
+
+Three limits of the pick (the LIMITS paragraph of §hold-note): once every voice is busy the
+round-robin voice is taken, and the lane it last played decides (§steal-x, `stealX`, read
+before the pool's lane entry is overwritten). Another lane's note on it is a cross-lane steal:
+holdCont is false, so `\freq` is set and latched at this moment (and f2map maps it), the gate
+takes the micro-dip re-attack (gate 0 now, gate 1 in 4 ms) and the gate-off goes at the new
+cell's end — the stolen note is cut. A same-lane note on it (or a lane-less note from an old
+compiler) is the merge — no attack, no pitch re-latch, gate-off at the later end, the voice
+remapped onto the new cell's buses. With `voices` 1 the pick is always voice 0, so every
+overlap is one of the two: a second lane's onset re-attacks, a same-lane overlap merges. A
+structural redeploy of the row (a cell
+edit, a block's height change, a par inserted above a row) never meets a stale lane tag: the
+compiled row code opens with `~f2FreeSceneVoices`, which drops the row's pools and gates their
+voices off at the eval, so every sounding note of the row releases at the edit and re-attacks on
+a fresh pool at the next cell event, on every lane. A cell shorter than 0.05 beat is clamped to 0.05 for the
+gate-off (a lone hold note that short sounds 0.08 beat; a touching same-lane cell still continues
+it), and a gap shorter than 0.03 beat between two hold cells of one lane is bridged.
+
+**Diagnosing the pick.** `topEnvironment[\f2DebugHold] = true` posts one line per hold event:
+`[f2 hold] <poolKey> cid <f2_cid> lane <lane> voice <idx> <cont|fresh|steal> off-in <ms>
+respawned <bool>` — `cont` = found by endingV, `steal` = every voice busy (`steal from <lane>`
+names the stolen lane on a cross-lane steal, the re-attack; `steal (merge)` is the same-lane
+merge), `fresh` = a free voice; `off-in` is that voice's pending gate-off relative to now at the
+moment of the decision (negative = the voice was free). Off by default; set the flag to nil to
+stop.
 
 ### The stack's macro knobs
 
@@ -432,3 +491,167 @@ in the sequencer.ts lists (like smooth and latch).
 - Keys with a dot: check the UI's hiding regex (`/^(f2|i_|t_|__)/` — by prefix, so `osc.ratio`
   is not caught) and SKIP_PARAMS (sub-modules do not expose out/i_free/tel_bus — the stack sets
   those).
+
+## §post: the strip divider — the preset's post group (stage 4 of SCOPE-DECKS §5)
+
+A strip may carry a **divider** (`Preset.chainDivider`, docs/wiki/Card-Chains.md "The
+divider"): cards left of it are spawned per voice and per copy as before; cards right of it
+are the preset's **singleton processors** — one instance per preset per row pool, never
+multiplied by voices or copies, reading the **sum** of every voice's (and copy's) final stage.
+A source card is never right of the divider. The compilers emit the right side as its own list
+in the `~f2ReuseCfg` line, right after `chainN` and only when a divider exists (a strip
+without one compiles byte for byte as before): `post: [(id, unit, opts?, rd, wr)…]` with its
+own numbering (`rd` 0 = the post-in bus, a processor writes the next post stage, the last
+writes -1 = the sink's input, post slot `postN` — with k post cards card i reads i, writes
+i + 1 and postN = k, the chain convention), and `postMap:
+[\id__param, \scKey …]` = the **preset-level** SC key of every numeric live param of every
+post card (`f2_p_<preset>_<param>` — the core delivers a post param once per preset per tick,
+not per cell).
+
+**Layout.** When `cfg[\post]` is present (and `\f2chainOut` is loaded — in the legacy layout
+the post cards are skipped with one warning until f2units arrives, and `|sink0` respawns the
+pool then) the pool's stage bus gets its pool-level pairs **at the front**: pair 0 is the
+**post-in** — the final stage (`wr` -1) of every voice and copy, all `Out.ar`-summing into it;
+pairs 1..postN-1 are the private post stages; the sink's input is pair postN (the post-in
+itself when every card right of the divider is bypassed). The per-voice stages follow those
+pairs (`slot(k) = sb.index + 2·(postOff + ((k·nv + vi)·nk + ci))`, `postOff` = the number of
+pool-level pairs); without a divider the formula is exactly the old one. The voice groups get
+**no sink**: the one sink is the post group's.
+
+**Lifecycle.** `pool[\post] = (grp, nodes, sink, bus)` is built once per pool right after
+the voices (`mkPost`): a `Group.after(vgrp)` — after the preset's §loop-order voice subgroup,
+so a voice respawned later (`\addToTail` inside vgrp) still executes before it (in the
+§loop-order fallback, voices straight in the pattern group, the post group sits at that group's
+tail and every voice group spawned after it goes `Group.before` it — `voiceGrp`) — holding, in
+strip order, one Synth per post card (its SynthDef variant through `~f2UnitDef`, like a
+card's; `i_free` 0 — it plays for the pool, not for a note; `gate` 1 — a processor reading a
+stage runs env = 1 anyway; `chainIn` = its rd pair; `out` = its wr pair or the sink's input;
+the same resource buffers as a card — sample, IR, curve, slice tables — through the shared
+`resArgs`) and LAST the sink `\f2chainOut` (the final post pair → the preset's out × the
+preset level). The group is freed **with the pool, after the voices' release**: the soft
+retire of §cfg-sig frees it in the same 0.4 s deferral as the old voices (they sound through
+it for those 0.4 s, on the retired bus — the new pool allocates a fresh one), and
+`~f2FreeSceneVoices` does the same on a row stop; a hush takes it with the pattern group.
+A post group found dead under a live pool is rebuilt on the next event; a stage bus that
+could not be allocated (§bus-guard) gives no post group, and the next event tries again. The
+fingerprint gains `|p<cards>><postN>` (the same id:unit:opts:rd:wr@variant shape as `|c`), so
+a card moved across the divider, a post card added, bypassed or re-menued, or the divider
+removed, respawns the pool and rebuilds the post group with it.
+
+**Params.** Post params never ride an event: they are not in the voice's control union, so
+no per-cell set or map addresses a post node. Instead every `(id__param, key)` pair of
+`postMap` whose node declares the param is mapped **once at spawn** onto `~mbAt.(key)` — the
+preset-level bus the core writes — and registered in `~f2StaticMaps` (key → [(node, param,
+grp)]). Because nothing ever remaps a post node, f2_modsmooth calls
+`topEnvironment[\f2SmoothHook]` right after it creates the smoother of a key (`~f2FlagApply`,
+guarded and nil-safe), and the hook remaps every registered consumer of that key onto the
+smoothed bus; entries leave with their post group (`~f2FreePost`) or when the node is found
+dead. The bare preset level `amp` and the per-event rack bus `out` (§node-bus) go to the post
+sink instead of a per-voice sink, only when they change (`pool[\postAmp]`, `pool[\postOut]`);
+a mapped `amp` (in f2map) is mapped on the sink and follows the bus of the last event.
+
+**telId and ports.** With a divider the LAST post card — the strip's output card — takes
+`telId` (the voice loop gives it to no left card; a samplerU card keeps its per-voice
+playhead telemetry). Port inputs on a post card take **slot 0** of the writer
+(`~f2PortInSlot.(pn, 0)`); a port-writing preset's sink writes `~f2PortOutSlot.(po, 0)` —
+the summed signal into slot 0 of the port (the readers' `vi % wv` fan-out sees one voice).
+
+**Limits.** One post group per (row × preset) pool: two rows playing the same preset have two
+post groups (the pools are per row, §reuse). A post card's envelope is 1 forever (the env=1
+rule of §cards: it reads a stage) — a processor whose sound depends on gating (stutU's
+re-slice on the gate, an envelope-shaped effect) does that per voice, left of the divider.
+Post params come from the core once per preset per tick: the value of the first active cell
+of the preset in tree order, the base when the preset is silent — cell locks on a post param
+of two cells sounding at once cannot both apply. The node-order guarantee is the sibling
+order of the pattern group (the post group sits after the preset's own subgroup only); a port
+loop through a post card is one block late like any port hop.
+
+## §scope-deck: decks on tree nodes and blocks (stage 5 of SCOPE-DECKS §5)
+
+Every tree container and every block owns a **deck** (`TreeContainer.deck` / `Block.deck`,
+docs/wiki/Decks.md): a strip of sound-processing **singleton** cards — processors with a
+`chainIn`, no sources, no modulators — empty by default. Where a post group is one instance
+per (row × preset), a deck is one instance per (row × scope), and it does not belong to a
+pool: it is created at deploy, **kept across redeploys while its cards are unchanged** (a
+reverb tail survives a redeploy), and freed when the row stops or the deck is removed. The
+routing is the session builders' (both engines, identical): a node's deck processes only the
+children that **inherit** its bus; a child that overrides the bus is its own exit into the
+rack. Every event therefore carries `f2deck: '<scope>'` (the deck it feeds; absent = the rack
+on its `outBus`) and the `~enrich` wrapper asks `~f2DeckIn.(row, scope)` for that deck's IN
+pair and puts it on the event's `\out` — the existing per-event out path of `\f2voice` (voice
+`outAt`, `pool[\postOut]`) applies it, nothing else in `\f2voice` changes. A nil (no such
+deck, or its bus could not be allocated) falls back to the `outBus`.
+
+**Registry.** `~f2Decks`: rowKey → (scope symbol → entry). An entry holds `grp` (the deck's
+Group), `nodes` (id → Synth), `nodeCtl` (id → the def's control names), `sink` (a
+`\f2chainOut` with `amp` 1 — a deck has no level of its own), `bus` (`Bus.audio(s,
+2·(deckN+1))`: pair 0 is the deck's **IN pair**, pairs 1..deckN the stages — card i reads i
+and writes i+1, the last writes -1 = the sink's input, pair deckN; the same numbering as a post
+group, `stagesOf` in the compilers), `sig`, `depth`, `scope`, `sinkScope`, `busName`,
+`outIdx`, `alloc` (the audio-bus allocator the bus came from — an index from a previous server
+life is forgotten, never freed, like `~f2StackBusRel`) and `at` (creation time).
+
+**Ladder.** `~f2DeckGroup` is one `Group.after(~f2PatGroup)`, created lazily by
+`~f2DeckGroupAt`: every voice executes before it (voices live in the pattern group, at the head
+of the default group, and `/f2/eval` recreates that group at the head before every eval — a
+deck group created after any pattern group sits after all of them), the rack groups
+(`Group.tail` at the rack deploy) after it. The group is registered as playing at once
+(`register(true)`); `isPlaying` turns false only when the server reports its end (a hush does
+not free it, a CmdPeriod does), so a group younger than a second is trusted as it is and an
+older one that is not playing is replaced. With no pattern group at all the deck group goes to the tail of the
+default group, after the rack, and says so once — decks routed to a rack bus are then silent
+until the next deploy. Inside the ladder the decks of a row execute **deepest first**:
+`~f2DeckSync` moves the row's deck groups to the tail of `~f2DeckGroup` by depth descending
+(ties by scope string), so a child's output is read by its parent in the same cycle (`In.ar`,
+no delay, like the rack pipeline). Decks of other rows keep their relative order — they write
+rack buses or their own row's decks only.
+
+**Sync.** The compiled program always emits, right after `~f2FreeSceneVoices` and before
+`~play`, `if(~f2DeckSync.notNil){ ~f2DeckSync.(\<row>, [ <deck>… ]) };` with the decks
+deepest first: `(scope: '<scope>', depth: <d>, cards: [(id, unit, opts?, rd, wr)…], deckN:
+<n>, deckMap: [\id__param, \scKey …] (live) | deckArgs: [\id__param, <value> …] (bake),
+sink: '<scope>'|nil, bus: \name|nil)`; an empty list frees every deck of the row. The sync:
+(a) frees every registered deck of the row whose scope is absent; (b) computes a **signature**
+per def — scope, depth, the cards as `id:unit:opts:rd:wr@variant` (the resolved SynthDef
+variant through `~f2UnitDef`, built by the deploy's `~f2UnitEnsure` lines), `deckN`, the
+`deckMap` pairs or the `deckArgs` — and keeps an entry with the same signature (its tails
+survive, only its target is refreshed), while a different signature frees the old entry and
+builds a new one, **reusing its bus when the pair count is unchanged** (the IN pair the
+sounding voices already write stays valid; a bus that no longer fits is retired after the
+voices' release through `~f2StackBusRetire`); (c) builds: a `Group` at the tail of the ladder,
+one `Synth` per card via the unit's variant with `[\out <wr pair | sink input>, \gate 1,
+\chainIn <rd pair>]` plus `[\i_free 0]` when the def has it, the tempo bus mapped when it has
+`\tempo`, a card without `chainIn` spawned with its stream dropped (warned once, like a post
+card), a card without a def skipped (`~f2UnitGone`), then the sink last; (d) resolves every
+deck's OUT in a **second pass**, once every deck of the row exists (a child needs its parent's
+IN pair, and the parent is built after it): `sink` → that deck's IN pair (`~f2DeckIn`), else
+`bus` → `~rack.bus[bus].index`, else `~rack.bus[\main].index`, else 0; (e) reorders the row's
+decks deepest first.
+
+**Params.** A deck param never rides an event: no per-cell key, no `f2map`, no init line. In
+live mode every `(\id__param, \scKey)` pair of `deckMap` whose node declares the param is
+mapped once onto `~mbAt.(key)` — the scope-level bus the core writes every tick
+(`f2_<scope>_<id>_<param>`, `paths.ScKey`) — and registered in `~f2StaticMaps` so the smoother
+created later for that key remaps the node (`~f2SmoothHook`), exactly like a post card. In
+bake mode the `deckArgs` are plain synth args at creation — a value change is a new signature
+and rebuilds the deck (its tail restarts). The core folds a deck param from its own scope, any
+parent and any child scope (deeper on top) and delivers the base when nothing plays.
+
+**Hush and stop.** A row's stop snippet (the conductor's Stop eval and `stopRowPdef`, byte
+for byte the same) reads `( Pdef(\<row>).stop; if(~f2FreeSceneVoices.notNil){
+~f2FreeSceneVoices.(\<row>) }; if(~f2FreeSceneDecks.notNil){ ~f2FreeSceneDecks.(\<row>) }; )`:
+the row's decks leave the registry at once and are freed after the voices' release
+(`~f2StackBusAfterBeats.(0.4)`, at least 0.5 s — the releasing voices sound through them, the
+post-group pattern): `n_free` on the group with the error suppressed, the group's static-map
+entries dropped, the bus freed. `/f2/hush` calls `~f2FreeAllDecks` right after
+`~f2PatGroup.freeAll`: decks live outside the pattern group, so a hush would otherwise leave
+them running — every deck of every row is freed at once (groups, buses, static maps, registry
+cleared) and the ladder is `g_freeAll`'d for whatever the bookkeeping missed.
+
+**Limits.** No ports, no `telId`, no resource buffers (sample, IR, curve) on a deck card. Bake
+mode bakes the values. A bus-allocation failure is posted at every attempt (like
+`~f2StackBusAt`) and bypasses the deck (the events fall back to their `outBus`); so does a
+missing `\f2chainOut` (f2units not loaded, said once).
+Bodies avoid bare `~` (`~f2DeckIn` runs inside Event play through the wrapper, the frees from
+the hush OSCdef and from deferred clocks); the rack is read through the file's `globalEnv`
+exactly as `~enrich` reads it.

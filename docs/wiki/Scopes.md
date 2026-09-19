@@ -10,9 +10,14 @@ only two: the **window** (when the modulator acts) and the **rank** (who wins a 
 | scope | notation | rank | window | typical use |
 |---|---|---|---|---|
 | preset | `p:<id>` | 0 | the window of whatever cell is playing it | the sound's base; parameter gates |
-| tree node | `n:<id>` | 1+ | the node's share of its parent's window | section modulation, per-branch behaviour |
+| tree node | `t:<id>` | 1+ | the node's share of its parent's window | section modulation, per-branch behaviour |
 | block | `b:<id>` | n | the block's interval in the tree | phrase-wide gestures |
-| cell | `c:<cid>` | n+1 | one slot | per-step gestures, slices |
+| cell | `c:<x>` | n+1 | one slot | per-step gestures, slices |
+
+The notations are the path segments the engines actually build (`src/lib/v2/paths.ts`, mirrored
+in `core/paths`), and a full scope path is those segments joined: `r0/sA/t:root/b:1/c:2`. A
+cell's segment is its **column index inside its block row**, not the block-and-index id the
+rest of the app calls a cid.
 
 **Rank is depth.** The preset is rank 0 — the most senior. Inside the tree, a deeper container
 is junior to a shallower one. A cell is junior to its block, which is junior to the node that
@@ -38,10 +43,21 @@ The window equals the share of phase the node occupies in its parent. A modulato
 container acts exactly when that branch is chosen and playing — and does not exist at all in
 the iterations where the branch is not chosen. See [[Randomness]].
 
+A tree-node scope and a block scope own a **deck** as well — the node's processor singletons,
+one instance per row, alive on silence, whose params are folded from the scope's own layers,
+its parents' and its children's ([[Decks]]). The window rule above is the modulator's; the deck
+itself has no window.
+
 ### Block scope
 
 A modulator here sees every cell of the block, across the whole of the block's interval. With
 `height > 1` all lanes are inside the same block window.
+
+Worth stating plainly, because it surprises people and because a whole class of "why is this
+not re-triggering" comes from it: a block's window opens **once per block** and runs 0→1 across
+all its cells — it does not restart per cell. A sampler at block scope therefore takes one
+reading per block, not one per note. If you want one per note from a block-wide modulator, the
+arm's `counts` row has a setting for it; see [[Arm Kinds|Arm-Kinds]] §7a.
 
 ### Cell scope
 

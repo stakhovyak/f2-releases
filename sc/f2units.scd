@@ -61,12 +61,12 @@
 //     the cutoff bus feeding the slot stays each unit's own law.
 //
 // PORTS (§4 of the concept, polyphony as «clone the graph per voice»):
-//   ~f2Ports[\name] = (bus: Bus.audio(s, 10), wv: writing voices 1..5)
+//   ~f2Ports[\name] = (bus: Bus.audio(s, 32), wv: writing voices 1..16)
 //   voice k's slot is the stereo pair bus.index + 2k;
-//   writer k writes slot (k % 5); reader k reads slot (k % wv) — the pairs
+//   writer k writes slot (k % 16); reader k reads slot (k % wv) — the pairs
 //   carrier[k] ⇄ mod[k] are deterministic, and a hold stick keeps them stable.
 //   ~f2PortEnsure is called by the compiler (the deploy preamble, wv = the writer's
-//   voices); the lazy ~f2PortAt covers a reader that spawns early (wv defaults to 5).
+//   voices); the lazy ~f2PortAt covers a reader that spawns early (wv defaults to 16).
 (
 topEnvironment.use {
 
@@ -74,8 +74,8 @@ topEnvironment.use {
 // s.newBusAllocators (dead or someone else's indices) — so the registry is cleared and
 // the old commit nodes silenced; the deploy recreates the ports fresh (the voices
 // respawn from the deploy preamble anyway). §bus-gen AND THE BUSES, not only the commit
-// nodes. A port holds two of them, 10 channels each (W and R), and the registry was
-// thrown away right here — without a .free those twenty channels went nowhere on EVERY
+// nodes. A port holds two of them, 32 channels each (W and R: 16 stereo pairs), and the
+// registry was thrown away right here — without a .free those 64 channels went nowhere on EVERY
 // reload of f2units, not only the first. They are freed under the allocator stamp (see
 // ~f2StackBusRel in f2dsl): an entry that outlived a server reboot points at indices from
 // a previous life, and handing those to the new allocator would be a gift of someone else's
@@ -121,9 +121,9 @@ topEnvironment.use {
 // not born yet) — and commit would drive that block into R FOREVER: readers would get a
 // frozen signal instead of silence («the sound sticks»).
 SynthDef(\f2portCommit, { |w = 0, r = 0|
-	var sig = In.ar(w, 10);
+	var sig = In.ar(w, 32);
 	ReplaceOut.ar(r, sig);
-	ReplaceOut.ar(w, DC.ar(0) ! 10);
+	ReplaceOut.ar(w, DC.ar(0) ! 32);
 }).add;
 // §port-sum THE EMERGENCY SWITCH: `~f2PortSum = false;` + a redeploy → readers read W
 // directly again (the old behaviour, node order matters again).
@@ -137,7 +137,7 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 	};
 	g
 };
-~f2PortEnsure = { |name, writerV = 5|
+~f2PortEnsure = { |name, writerV = 16|
 	var dict = topEnvironment[\f2Ports];
 	var key = name.asSymbol;
 	var e = dict[key];
@@ -150,12 +150,12 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 		e = nil;
 	};
 	if (e.isNil) {
-		e = (bus: Bus.audio(s, 10), rbus: Bus.audio(s, 10), wv: writerV.asInteger.clip(1, 5),
+		e = (bus: Bus.audio(s, 32), rbus: Bus.audio(s, 32), wv: writerV.asInteger.clip(1, 16),
 			alloc: s.audioBusAllocator);
 		dict[key] = e;
 	} {
-		e[\wv] = writerV.asInteger.clip(1, 5);
-		if (e[\rbus].isNil) { e[\rbus] = Bus.audio(s, 10) };
+		e[\wv] = writerV.asInteger.clip(1, 16);
+		if (e[\rbus].isNil) { e[\rbus] = Bus.audio(s, 32) };
 	};
 	// §port-sum the commit node is recreated ON EVERY DEPLOY, unconditionally: if the node
 	// died (a server reboot, CmdPeriod, someone else's freeAll) R would freeze forever —
@@ -165,11 +165,11 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 	e[\commit] = nil;
 	if (topEnvironment[\f2PortSum] == false) {
 		// the switch: readers go back to W (the old behaviour). Otherwise the previous R bus
-		// lost its last reference right here — ten channels per toggle.
+		// lost its last reference right here — 32 channels per toggle.
 		e[\rbus] !? { |b| if (b !== e[\bus]) { try { b.free } } };
 		e[\rbus] = e[\bus];
 	} {
-		if (e[\rbus] === e[\bus]) { e[\rbus] = Bus.audio(s, 10) };   // back from switched-off
+		if (e[\rbus] === e[\bus]) { e[\rbus] = Bus.audio(s, 32) };   // back from switched-off
 		e[\commit] = Synth(\f2portCommit,
 			[\w, e[\bus].index, \r, e[\rbus].index],
 			topEnvironment[\f2PortCommitG].value, \addToTail);
@@ -180,16 +180,19 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 	e
 };
 
+// a reader that spawns before the writer's deploy preamble: the port is ensured with
+// the default wv (16, the ceiling — every reader voice gets its own pair); the writer's
+// deploy then sets the real wv, and the reader's fingerprint (§port-wv in f2dsl) respawns it.
 ~f2PortAt = { |name|
 	topEnvironment[\f2Ports][name.asSymbol] ?? {
-		topEnvironment[\f2PortEnsure].value(name, 5)
+		topEnvironment[\f2PortEnsure].value(name, 16)
 	}
 };
 
-// the WRITER's slot: voice k → stereo pair k%5 (the W bus)
+// the WRITER's slot: voice k → stereo pair k % 16 (the W bus)
 ~f2PortOutSlot = { |name, vi = 0|
 	var e = topEnvironment[\f2PortAt].value(name);
-	e[\bus].index + (2 * (vi.asInteger % 5))
+	e[\bus].index + (2 * (vi.asInteger % 16))
 };
 
 // the READER's slot: voice k → stereo pair k % wv on the R BUS (§port-sum: the previous
@@ -197,7 +200,7 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 // old boot without commit (degrade to the previous behaviour, not to silence).
 ~f2PortInSlot = { |name, vi = 0|
 	var e = topEnvironment[\f2PortAt].value(name);
-	((e[\rbus] ? e[\bus]).index) + (2 * (vi.asInteger % ((e[\wv] ? 5).max(1))))
+	((e[\rbus] ? e[\bus]).index) + (2 * (vi.asInteger % ((e[\wv] ? 16).max(1))))
 };
 
 // §loop-cond THE LOOP CONDITIONER on a port input: gain → OnePole(damp) → tanh saturation
@@ -1750,6 +1753,13 @@ if (~f2SmpPV) {
 	e
 };
 
+// §port-who the node of a pooled voice through f2dsl's accessor (a stack /
+// strip / copies proxy answers its group); before f2dsl is loaded, or for a
+// plain Synth, the node's own id. Never nil for a live proxy.
+~f2PortVNode = { |sy|
+	var f = topEnvironment[\f2VNode];
+	if (f.notNil) { f.value(sy) } { sy.tryPerform(\nodeID) }
+};
 // §port-who one-line diagnosis: who touches a port right now. Console:
 //   ~f2PortWho.(\y2)
 // Prints the port's buses/commit, every ~f2ReuseCfg entry routed to it, and
@@ -1766,10 +1776,12 @@ if (~f2SmpPV) {
 			("  cfg %: portOut=% portIns=%".format(dk, po, pin)).postln;
 		};
 	};
+	// §stack a pooled voice may be a PROXY (stack/strip/copies: an Event whose
+	// node is its group) — ~f2VNode (f2dsl) is the one accessor that knows
 	(topEnvironment[\f2Voices] ? IdentityDictionary.new).keysValuesDo { |pk, pool|
 		if ((pool[\cfgSig] ? "").asString.contains(ks)) {
 			("  pool %: nodes % | sig %".format(pk,
-				pool[\synths].collect { |sy| sy.tryPerform(\nodeID) }, pool[\cfgSig])).postln;
+				pool[\synths].collect { |sy| topEnvironment[\f2PortVNode].value(sy) }, pool[\cfgSig])).postln;
 		};
 	};
 	nil
@@ -1777,13 +1789,17 @@ if (~f2SmpPV) {
 
 // §port-who instant mute: free every pool touching the port (they respawn with
 // the current cfg on their next trigger). Console: ~f2PortHush.(\y2)
+// §stack the node to free is ~f2VNode's answer (the GROUP of a stack/strip/copies
+// proxy — an Event has no nodeID, and `tryPerform(\nodeID)` on it was nil for every
+// composite pool: the hush freed nothing and the pool entry vanished with its nodes
+// still sounding, orphaned). A plain Synth answers its own nodeID either way.
 ~f2PortHush = { |name|
 	var ks = name.asString;
 	var vs = topEnvironment[\f2Voices] ? IdentityDictionary.new;
 	vs.keys.asArray.do { |pk|
 		var pool = vs[pk];
 		if ((pool[\cfgSig] ? "").asString.contains(ks)) {
-			pool[\synths].do { |sy| sy.tryPerform(\nodeID) !? { |nid|
+			pool[\synths].do { |sy| topEnvironment[\f2PortVNode].value(sy) !? { |nid|
 				s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) } };
 			vs.removeAt(pk);
 			("[f2 port-hush] freed pool %".format(pk)).postln;

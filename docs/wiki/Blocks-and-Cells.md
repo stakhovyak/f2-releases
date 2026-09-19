@@ -48,7 +48,12 @@ two blocks of coprime width under `~c` is the cheapest polyrhythm in the system 
 [[Tree Operators|Tree-Operators]] §`~c`).
 
 Set width from the block section of the sidebar or from the palette commands
-(`width 1/2/4/8/16`; any integer is valid, the presets are just the common ones).
+(`width 1/2/4/8/16`; any integer is valid, the presets are just the common ones). The block
+editor is a table of rows — `width`, `height` — and, as its last, separate item, the `bus`
+table of the block's tree reference: one button per named bus of the rack, all off = inherit
+([[Tree Operators|Tree-Operators]] "Node properties"); each of them, like every section of the
+sidebar editors, folds to its heading with a click on the heading. The rack's default output
+is not a button; it is where the sound goes when nothing is set.
 
 ### Height — the lanes
 

@@ -59,8 +59,8 @@ Time constants are in **beats**, so they rescale with tempo.
 | selector | channel | exists |
 |---|---|---|
 | `m:1` … `m:4` | `m:<k>/#value` | always |
-| `win` | `<scope>/~win` | within the scope's window |
-| `win:up` | `<parent>/~win` | within the parent's window |
+| `win` | `<scope>/~win`; at preset scope `r<row>/p:<id>/~win` | within the scope's window |
+| `win:up` | `<parent>/~win`; at preset scope nothing resolves | within the parent's window |
 | `@<uid>` | `<scope>/@<uid>` | within the modulator's window |
 | `=<param>@<cid>` | `<cell>/=<param>` | always |
 | `bus:<name>` | a user-named channel | while something writes it |

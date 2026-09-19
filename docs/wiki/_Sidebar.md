@@ -16,7 +16,9 @@
 
 **Sound**
 - [[Palette]]
+- [[Polyphony]]
 - [[Card Chains|Card-Chains]]
+- [[Decks]]
 - [[Synth Modules|Synth-Modules]]
 - [[Rack]]
 - [[Writing Synths|Writing-Synths]]

@@ -137,7 +137,49 @@ exist** in the second.
 
 ## Node properties
 
-Every tree node carries: its operator, its **weight** (used by the parent's `~w` / `~rw`), and
-its own modulators and locks at **node scope**. A block reference carries a weight too.
+Every tree node carries: its operator, its **weight** (used by the parent's `~w` / `~rw`), its
+**bus**, its **deck**, and its own modulators and locks at **node scope**. A block reference
+carries a weight and a bus too; the block itself carries a deck. The node editor of the tree
+scope shows them as tables under the node's head — weight, child weights, bus — and its
+panels and tables, like every section of the sidebar editors, fold to their heading with a
+click on it.
+
+### The deck
+
+Every container and every block owns a strip of processor singletons — its [[deck|Decks]],
+empty by default — that processes the sum of everything playing under it, before the parent's
+deck or the rack. Select the node (or the block) with the bottom deck panel open and the panel
+shows its deck, whose knobs are aim targets like a strip's (⊕ on a modulator, click the
+knob, drag the swing); the routing rule and the fold of a deck param are on the [[Decks]] page.
+
+### The bus
+
+The rack bus a node's sound goes to is a property of the **tree**, not of the preset. In the
+node editor and the block editor it is the **last, separate item** of the panel — a `bus`
+table under everything else — holding a row of **bus buttons**, one per named bus of the rack:
+the lit one is the node's own bus, the same button again clears it, and all off means inherit.
+The rack's default output is not among the buttons: it is the fixed technical exit, where the
+sound goes when nothing is set, not a choice. A save that names it explicitly is read as
+nothing set, and the loader unsets the field, so a node that once said "default" under a
+parent on `bus1` now inherits `bus1`.
+
+- **Root default.** The scene's root node sets the bus for the whole scene. Select the root's
+  entry dot and light a bus in the `bus` row of the node editor.
+- **Inheritance.** A node without a bus of its own goes where its parent goes. With no button
+  lit, the row's title says what that is: `all off = inherit (bus1)`.
+- **Override.** Any container sends its whole subtree elsewhere by setting its own bus; a block
+  reference overrides for that one block (the `bus` row of the block editor, which edits the
+  block's first reference in tree order). The choice is one undo step. A child with its own
+  bus also leaves its parent's deck: it is its own exit into the rack ([[Decks]] §3).
+- **Nothing set anywhere** — the tree resolves to no bus, and each cell falls through to its
+  preset's legacy bus (the `outBus` line of the preset def), else the default output. That is
+  how a save written before the bus lived on the tree sounds as it did.
+- **The label.** The canvas writes the resolved bus above every container's operator label:
+  solid when the node sets it itself, dimmed when inherited, nothing when unresolved or when
+  the node goes to the default output — only a named bus is written. A block reference with
+  its own bus carries the label above its card.
+
+A cell under a node with a bus gets `outBus: \<bus>` on its event, and the DSL's `~enrich`
+lets the event's key win over the preset def's. See [[Rack]] §3.
 
 See also: [[Windows]], [[Scopes]], [[Randomness]], [[Blocks and Cells|Blocks-and-Cells]].

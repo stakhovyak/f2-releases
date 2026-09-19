@@ -15,13 +15,15 @@ s.options.maxNodes = 8192;
 // yet (see the ~f2PolyTables comment in f2units.scd). scsynth's default is 1024.
 s.options.numBuffers = 4096;
 // Headroom for the audio-bus allocator. scsynth's default is 1024 channels for
-// everything: the rack's own buses, every Ndef proxy in the chain, the 10-channel
-// module ports and the per-pool stereo stack slots. Two leaks used to eat that
-// pool over a long session (see §bus-reuse in rack.ts and §bus-gen in f2dsl.scd);
-// both are fixed, but a busy rack plus a deep stack is legitimately in the
-// hundreds, and running the pool dry is silent — Bus.audio simply returns nil and
-// the next `.index` kills the voice event. 4096 channels cost about a megabyte.
-s.options.numAudioBusChannels = 4096;
+// everything: the rack's own buses, every Ndef proxy in the chain, the 32-channel
+// module ports (W and R each, §poly16) and the per-pool stereo stack slots. Two
+// leaks used to eat that pool over a long session (see §bus-reuse in rack.ts and
+// §bus-gen in f2dsl.scd); both are fixed, but a busy rack plus a deep stack is
+// legitimately in the hundreds — and a sixteen-voice strip of n stages with k
+// copies owns 2·(n+1)·16·k channels per (row × preset) pool on its own. Running
+// the pool dry is silent — Bus.audio simply returns nil and the next `.index`
+// kills the voice event. 16384 channels cost about four megabytes.
+s.options.numAudioBusChannels = 16384;
 s.newBusAllocators;
 s.waitForBoot({
     var dsl = res.("f2dsl.scd");

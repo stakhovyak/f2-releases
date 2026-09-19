@@ -19,6 +19,11 @@ The layer applies to **all sounding cells within the scope** whose preset has th
 A cell whose preset does not have the parameter is simply not affected — nothing errors and
 nothing is silently dropped elsewhere.
 
+A parameter name also reaches a [[deck|Decks]] card's knob (`<id>.<param>` on a tree node's or
+a block's deck): a deck is one instance, so its value is the deck's base folded with every
+layer on that name from the deck's own scope, any parent and any child of it — deeper on top,
+the base when nothing plays. Preset-scope layers stay with the preset.
+
 How several layers on one parameter combine is [[Value Composition|Value-Composition]].
 
 ---
@@ -66,8 +71,8 @@ inlet ← source × depth + off      (mode: over | + | × | min | max)
 | selector | channel | purpose |
 |---|---|---|
 | `m:1` … `m:4` | `m:<k>/#value` | the global macro knobs |
-| `win` | `<own scope>/~win` | one's own window phase |
-| `win:up` | `<parent>/~win` | the parent window's phase |
+| `win` | `<own scope>/~win`, or `r<row>/p:<id>/~win` at preset scope | one's own window phase |
+| `win:up` | `<parent>/~win`, and **nothing** at preset scope | the parent window's phase |
 | `@<uid>` | `<target scope>/@<uid>` | another modulator's live output |
 | `=<param>@<cid>` | `<cell>/=<param>` | a cell parameter's **final** value |
 | `bus:<name>` | a user-named channel | anything published by name |

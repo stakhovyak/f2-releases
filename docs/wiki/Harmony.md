@@ -69,7 +69,7 @@ The number of melodic trees appears in the main header's LCD.
 
 ---
 
-## 4. One preset — one voice, one note
+## 4. One preset — one voice, one line
 
 The rule that decides how you build a chord:
 
@@ -77,21 +77,30 @@ A preset binds to exactly **one** voice. Assigning a preset to a voice unassigns
 other voice of every tree.
 
 Every simultaneous call of a preset — parallel branches, several cells, several lanes — reads
-**one frequency bus**. So a preset always plays **one note**; multiple calls are a unison of
-instances, not a chord.
+**one frequency bus**: the voice's trajectory. So a preset follows **one melodic line**; it
+cannot be given a chord of its own. But it does not always sound one pitch: each note takes the
+bus value **at its own onset** (§5), so two calls that start at different moments hold two
+points of the same trajectory. Two lanes of a hold preset under a walk give intervals — the
+line against itself — not a unison; a unison is what you get when the calls start together, or
+when the voice does not move between the onsets.
 
-**A chord is built from parallel calls of different presets bound to different voices.**
-Several presets on one voice give you unison or layered timbres of one note.
+**A chord with independent voices is built from parallel calls of different presets bound to
+different voices.** Several presets on one voice give you unison or layered timbres of one
+line.
 
 ---
 
 ## 5. How it reaches the synth
 
-The core computes a frequency per voice each tick and writes it to a control bus; the compiler
-maps the bound preset's `\freq` to that bus. So:
+The core computes a frequency per voice each tick and writes it to a control bus. The bound
+preset does **not** read that bus while it sounds: every event of the preset **samples the bus
+at its onset** and hands the synth a number (`detunedFreq`, a per-event read of the voice bus).
+So:
 
-- pitch arrives **continuously**, not only at the onset — which is what makes `slew` a real
-  portamento rather than a per-note setting;
+- the bus moves continuously (`slew`, the walk), the notes do not: a note keeps the pitch it
+  started with, and the next attack takes the bus value of its own moment;
+- `slew` is heard through the onsets — a note that starts while the voice is still gliding is
+  latched on the way, at the in-between value;
 - a preset's own `freq` parameter is **overridden** while it is bound;
 - voice trees are octave-agnostic; the octave range lives on the voice.
 
@@ -99,16 +108,34 @@ maps the bound preset's `\freq` to that bus. So:
 
 The interaction is worth stating, because it is where the two systems meet.
 
-With **RE-ATK** and **LEGATO**, each cell re-triggers the envelope, so a pitch change between
-cells is heard as a new note — and `slew` glides into it.
+With **RE-ATK** and **LEGATO**, each cell re-triggers the envelope and latches anew, so a pitch
+change between cells is heard as a new note on the next cell.
 
-With **HOLD**, a run of adjacent cells is one gate. The frequency bus keeps moving underneath
-that single held note, so a walk that steps during the run is heard as a **glide or a
-portamento inside one note** rather than as separate notes. This is the cheapest way to get a
-legato melodic line: hold plus a walk on a step grid finer than the cells.
+With **HOLD**, a run of adjacent cells is one gate and one latch: the run keeps the pitch of its
+first cell to its end, however far the bus walks underneath. A walk step during the run is
+**not heard**; it lands on the next attack — the next run of that lane, or a cell after a rest.
+To hear a walk on a hold preset, break the runs (rests, another preset in between) or put the
+melody on RE-ATK / LEGATO cells on the walk's grid.
 
 One detail from the engine: the frequency is **latched as a number at the onset** so that voice
-reuse does not fight the harmony bus; continuing a hold run does not re-latch, which is exactly
-what lets the pitch move inside the run.
+reuse does not fight the harmony bus; continuing a hold run does not re-latch, which is what
+keeps a held note from jumping when the progression changes under it — melody and tree changes
+land on the next attack, never mid-note.
+
+Per articulation and per kind of event, what the latch does:
+
+- **RE-ATK / LEGATO** — every cell latches anew: a walk step lands on the next cell.
+- **HOLD, a fresh onset** — latched at that onset; the run keeps this pitch to its end. Two
+  simultaneous runs of one preset (two rows of a block, two par branches) latched at different
+  moments hold **different** pitches of the voice's trajectory (§4).
+- **HOLD, a continuation** — the adjacent cell of a run: never re-latches.
+- **HOLD, every voice busy** — the round-robin voice is taken (Polyphony.md §4). When the
+  note on it belongs to **another lane**, the new note attacks and latches the bus value of its
+  moment; the stolen note is cut. When it belongs to the **same lane**, the onset is merged into
+  the sounding note: no attack and the stolen note's pitch. Give the preset more voices to keep
+  both notes.
+- **A respawned voice** (the synth died and was rebuilt) latches at its rebuild.
+- **A channel-gated preset** (`gate ←`) latches at every cell: its gate is the channel, so the
+  latch lands on whatever note the channel holds open.
 
 See also: [[Palette]], [[Scenes]], [[Writing Synths|Writing-Synths]].

@@ -55,6 +55,13 @@ States: **active** (filled), **pending** (blinking until the boundary), **edited
 A launch is quantised against the **core's** transport, not a UI timer: the row starts on its
 own grid boundary. See [[Architecture]] §3.
 
+Each scene has its own tree, so each scene has its own **rack bus**: the bus set on the tree's
+root is that scene's default, and the same preset may go to different buses in different scenes
+([[Tree Operators|Tree-Operators]] "Node properties"). A scenes file written before the bus
+lived on the tree is migrated on load, one cell at a time — the presets' old bus becomes the
+root's, a block that went elsewhere keeps its bus on its reference, and a block whose cells
+went to two buses is reported in the console with the bus that was kept.
+
 ---
 
 ## 3. Program mode

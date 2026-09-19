@@ -80,6 +80,9 @@ Every card, whatever its kind, has the same parts in the same places:
 - **`+ listen`** — the subscription section, where this module's inlets read channels;
 - **the preview** — the exact trajectory the engine will produce, not an approximation.
 
+In a sidebar the cards of one kind share a rail, and the rail's height is yours: drag its
+bottom edge, and every rail of that kind follows; what no longer fits scrolls inside the card.
+
 ### Rename, comment, document
 
 A card can be renamed, and it can carry a comment. This is not decoration: a patch of thirty
@@ -96,6 +99,7 @@ the scope bus. Name the ones that are gates or hubs; leave the leaves unnamed.
 | the block section | block scope |
 | a tree node's section | node scope |
 | the palette's param-locks section | preset scope |
+| ⊕ + a deck knob (the slot layer of an arm, [[Decks]] §4) | the deck's owner (node or block scope) |
 
 The buttons are the same everywhere: `+fx` · `+ramp` · `+fx ramp` · `+lock ramp` · `+func`.
 An "oscillator" is a ramp with the `lfo` form; there is no separate LFO object.

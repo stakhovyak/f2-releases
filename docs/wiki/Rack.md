@@ -47,9 +47,23 @@ outputs are summed at the node's output. Two modes:
 `deploy` generates one Ndef per node, wires the nodes with buses, and orders the execution
 groups — sources → effect chains → master — with the bus sum going to the master.
 
-After a deploy the context is re-read, and the buses appear as values of the presets' `outBus`
-parameter. Setting `outBus` routes a preset into a rack bus; the same choice is available as
-the **output buses** toggles in the [[Palette]].
+After a deploy the context is re-read, and the named buses appear in the `bus` table of the
+tree's node editor and block editor — the last item of each panel. Presets no longer choose a
+bus — **tree nodes do**: the scene's root sets the default, children inherit it, and any
+container or block reference overrides its subtree ([[Tree Operators|Tree-Operators]] "Node
+properties"). The rack's default output is never offered there: it is the fixed exit the sound
+takes when no bus is set, not a choice. A cell under a node with a bus carries `outBus:` on its
+event, which the DSL's `~enrich` resolves to that bus's index.
+
+A preset def still carries its legacy `outBus` line (the `outBuses` field of old saves). It is
+read only when no node of the tree sets a bus, so old projects route as they did; the loader
+moves a save's preset buses onto the tree once and reports any block whose cells disagreed.
+
+Between a cell and its rack bus there may be **decks**: a tree node's or a block's own
+processor singletons ([[Decks]]), built by the row program rather than by the rack. A cell's
+audio goes to the nearest deck up its tree, deck feeds deck, and the outermost one writes the
+rack bus the node resolves to. The rack starts where the decks end; `+fx` locks still address
+rack effects, never deck cards.
 
 The deploy also publishes the **alias map** to the fx lock cards: `fx` and `fx ramp` list the
 rack nodes by alias, and a node's parameters are the arguments of its effect function.
