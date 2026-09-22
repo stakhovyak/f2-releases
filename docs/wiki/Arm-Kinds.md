@@ -335,14 +335,24 @@ for.
 
 ## 5. Interceptors
 
-Right-click a knob that carries an arm and the range popup grows a **modulation** section, one
-block per arm: how it lands, its kind, an `add` list, its named quantities (§2a), the raw block
-behind `▸ n mods`, a centre box and the depth. Every row is `label | control | tools` on one
-grid, and a row is not a label: clicking a number edits it and never starts picking a source.
-The pick inputs show one-word titles (`add` / `duck`, `let go` / `stay` / `ease back`,
-`own` / `parent` / `knob`, …) and each carries a `?` that opens the documentation of that
-input's options. `remove arm` is not in the block: it is a button in the popup's footer beside
-`ok` and `reset`, one per arm, named after the arm when the knob carries several.
+Right-click **any control that carries an arm** and a popup opens with a **modulation**
+section in it, one block per arm: how it lands, its kind, an `add` list, its named quantities
+(§2a), the raw block behind `▸ n mods`, a centre box and the depth. Every row is
+`label | control | tools` on one grid, and a row is not a label: clicking a number edits it and
+never starts picking a source. The pick inputs show one-word titles (`add` / `duck`,
+`let go` / `stay` / `ease back`, `own` / `parent` / `knob`, …) and each carries a `?` that
+opens the documentation of that input's options. `remove arm` is not in the block: it is a
+button in the popup's footer, one per arm, named after the arm when the control carries
+several.
+
+**Any control**, and not only a knob: the slider, the number field you drag, and the segment
+row are targets of the aim gesture by the same rule (§1), so they open the same menu. It used
+to be the knob's alone, which made an arm on a slider or a segment row one-way — it could be
+put there and seen, and never changed or taken off, because for a parameter whose only control
+is one of those there is no knob to fall back on. What is the knob's own is `range`, the
+min/max it lets you stretch by hand: that section appears on a knob and nowhere else, and it
+is why a knob opens its popup even with no arm on it while the other three open nothing when
+there is nothing to show. Escape closes the popup, and so does a click outside it.
 
 A spliced interceptor brings **its own quantities**, addressed by its own recipe: splice
 `smooth` onto `turing` and a `glide` row appears beside `length` and `deal`, and neither goes
@@ -675,6 +685,20 @@ The cost is real on gated kinds: a `chance` or `euclid` arm now holds three of i
 at birth (the mul, the generator, the rest node), leaving room for one interceptor. Set
 `rest` back to `let go` and the node is freed.
 
+### When it starts moving
+
+The **first** arm on a parameter takes effect at the next quant boundary, not the instant you
+drop it — the same wait as adding a cell or changing an articulation. Every later edit is
+immediate: a second arm on the same knob, and any change to an existing arm's depth, rate,
+curve or facets, all land live.
+
+The reason is where the value travels. A parameter nobody modulates rides one control bus
+shared by every cell of its preset (see [[Diagnostics]], "OUT OF MODULATION BUSES"); the
+moment something modulates it, each sounding cell needs a bus of its own, because two cells
+can now hold different values at the same moment. Which bus a cell reads is baked into its
+event, so the row's pattern is rebuilt — and a rebuild waits for the bar, like every other
+structural edit. Shorten the row's quant if the wait is in your way.
+
 ---
 
 ## 8. Taking turns
@@ -869,6 +893,12 @@ thing a preview can do.
   *skipped* note, and across the gap between two clock ticks, and not across a *silent* one. The preset's `win-tail` is the control that
   extends a window past its gate, and the TS preview does not implement it, so a tail is
   audible on the core and not in the browser.
+* **The aim does not outlive its subject.** Deleting the armed modulator — with its card, with
+  its preset, with its block, or by undoing the edit that made it — takes the aim down with it.
+  It used to survive, and then every knob refused with "the armed modulator is gone" while the
+  ⊕ that leaves the mode had gone with the card. Escape still leaves from anywhere. The same
+  holds for a **link pick** (§arm-pick), whose two ends are lock ids: lose either end and the
+  pick is cancelled rather than left waiting for a source it can no longer give away.
 * **A refused aim says why, and does not go red.** Red on a knob means the engine will pin the
   value (§arm-clip); a control the armed modulator cannot take gets `not-allowed` and a reason.
   The one refusal reachable in ordinary use is arming an arm's own layer card and clicking the

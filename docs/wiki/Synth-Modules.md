@@ -98,6 +98,14 @@ unit in the library.
 Resource options (not part of the variant name, resolved into buffers at spawn): `sample`,
 `cuts`, `slices`, `beatLen`, `onsetSens`, `pitchSens`, `curve`.
 
+`beatLen` is the beat grid for `slicing: beats` and its values are spelled with a slash —
+`1/1 1/2 1/4 1/8 1/16 1/32`, the triplets `1/4t 1/8t 1/16t 1/32t` and the dotted `1/4d 1/8d
+1/16d`. An option **value** is a resource name the engine looks up, so the compilers carry it
+into the program verbatim, quoted and escaped, and never through the identifier sanitiser
+that keys and card ids go through. (They used to: `1/4` reached the engine as `1_4`, missed
+`~f2SmpBeatLen` and fell through its silent `? 0.25`, so every pick but `1/16` sliced at a
+sixteenth while the card drew the grid the user had chosen.)
+
 The engines differ in what `speed` means. **Repitch** — speed changes pitch, as tape does.
 **Cycles** — periods are captured and replayed, so speed is independent of pitch; `cycChar`,
 `cycMod`, `cycHarm`, `fund`. **Textures** — granular, with `grainSize`, `motion`, `grainEnv`,
@@ -107,8 +115,13 @@ The engines differ in what `speed` means. **Repitch** — speed changes pitch, a
 each with its own rate, direction, position and size (`density`/`grainRate`, `grainDir`,
 `phaseDisp`, `latchRate`, `grainSurvive`).
 
-Spectral needs **sc3-plugins**. Checked once at load (`\PV_PlayBuf.asClass.notNil`); without
-it the generator builds a `Warp1` fallback and posts a reduced-capability warning.
+Spectral needs **sc3-plugins**. Checked once at load (`~f2ExtHas`, the `pv` capability);
+without it the generator builds a `Warp1` fallback and posts a reduced-capability warning.
+The classes it needs are reached by NAME, never written literally, because sclang resolves a
+class name when it compiles the file: a literal would take the whole units file down on a
+machine without the pack. The same capability gate covers the four filter models built on
+`SVF` (`sk`, `svf`, `fizz`, `ripple`), which are dropped from `~f2FltBuilt` and from the
+card's menu when the pack is absent.
 
 Each voice publishes its playhead over `/f2_head`, which is what the waveform display draws.
 
@@ -124,7 +137,10 @@ slicer workflow has no Sampler counterpart yet.
 ## 3. The thirteen processors
 
 One card draws all thirteen, because they are one construction: the input conditioner, the
-unit's own middle, the (inert) envelope, the EQ. The ranges below are the graph's own clips.
+unit's own controls, the (inert) envelope, the EQ. The card is three 66px bands, the height of
+every synth card: the unit's own row — headed by the **input group**, the primary port and the
+conditioner's `gain · damp · sat` as ordinary knob cells behind a hairline — then ENV, then
+EQ. The ranges below are the graph's own clips.
 
 | unit | primary in | its own controls |
 |---|---|---|
@@ -214,6 +230,22 @@ writers that happened to sit earlier in the node tree — "the loudest one survi
 picture changed on every redeploy. The cost is exactly one block of delay per hop, uniformly.
 
 `~f2PortSum = false` plus a redeploy restores the old direct-W behaviour if you need it.
+
+A port costs two 32-channel audio buses (W and R) plus its commit node, and it is created the
+first time a deploy names it. A deploy names **every** port of the whole session, whichever row
+it belongs to, so a name that is missing from a deploy preamble is a port the session no longer
+has: its buses are handed back at the end of that deploy, after the same delay a retiring stage
+bus waits — the voices that were reading it may still be playing out their release. Before that,
+nothing was ever released: renaming a port ten times left ten entries and 640 channels of the
+16384 gone for the rest of the session, and a session of renames eventually starved the
+allocator, at which point a port is bypassed and its audio simply stops arriving. An eval that
+names no port at all — a project's content boot — is not a deploy and retires nothing.
+
+A port input is a reference **by name**, so it outlives the preset that writes the port.
+Deleting that preset — renaming or clearing its out port, or pasting other content over it,
+which keeps its identity and can drop that port — clears every input reading a port no preset
+writes any more and logs which card lost its input. A name no preset has written **yet** is left alone: the port menu lets you
+name the reader's side first and set up its writer afterwards.
 
 ---
 

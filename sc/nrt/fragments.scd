@@ -17,14 +17,35 @@ var here = thisProcess.nowExecutingPath.dirname;
 var out = ("F2_NRT_OUT".getenv ? "/tmp");
 var scDir = here.dirname;
 var sr = 48000, slot = 1.0, msgs = [], score, cases, id = 4000, defs, wins, wBase, wN;
-var bClick = 50, bNoise = 51, bChirp = 52;    // above the banks f2units allocates
+var bClick, bNoise, bChirp;                   // ASKED FOR below, never guessed
 var nFrm = 24000;                             // 0.5 s of material per buffer
 var aiff = (out +/+ "fragments.aiff");
-var analyse, headCheck, gfails = 0, click, noise, chirp, chunk;
+var analyse, headCheck, gfails = 0, click, noise, chirp, chunk, baseNames;
 ~f2FlatWin = Buffer.new(s, 512, 1);
 thisProcess.interpreter.executeFile((scDir +/+ "f2units.scd"));
 wins = topEnvironment[\f2SmpWins];
 wBase = wins[\base]; wN = wins[\n];
+// ── the three test buffers' NUMBERS ───────────────────────────────────────
+// They must sit above every bank f2units allocated, and a literal cannot know
+// where that is. 50 / 51 / 52 were INSIDE the 16-window grain bank (measured:
+// it lands on 37…52), so `/b_alloc 52` destroyed window 15 and rebuilt it as
+// 24000 frames of chirp — and `grainEnv 1`, which is exactly window 15, handed
+// GrainBuf the CHIRP as its grain envelope. A 0.5 s chirp read as a 0.05 s
+// window is a 4…40 kHz sweep, aliased: every `grainEnv 1` case was measuring
+// that instead of the material, and `motion 0` read 18 kHz. Ask the allocator
+// f2units itself used — Buffer.new takes a number without touching a server,
+// which is how ~f2FlatWin is pre-seeded above.
+bClick = Buffer.new(s, nFrm, 1).bufnum;
+bNoise = Buffer.new(s, nFrm, 1).bufnum;
+bChirp = Buffer.new(s, nFrm, 1).bufnum;
+[bClick, bNoise, bChirp].do { |b|
+	if ((b >= wBase) and: { b < (wBase + wN) }) {
+		gfails = gfails + 1;
+		("  ### test buffer % lands INSIDE the grain window bank %…%".format(
+			b, wBase, wBase + wN - 1)).postln };
+};
+("  test buffers: click % noise % chirp % (grain window bank %…%)".format(
+	bClick, bNoise, bChirp, wBase, wBase + wN - 1)).postln;
 
 // ── the variants under test ───────────────────────────────────────────────
 // `head`: the [mode, span] the /f2_head reply of that variant must carry (§5).
@@ -69,9 +90,20 @@ headCheck = { |d, expMode, expSpan, expPtr = 6|
 			say.(vals[4].isKindOf(UGen), "mode is 12 + 32·slice — a UGen, not a literal");
 		};
 	};
-	// 107 = the §1 contract's 92 live + freq + the six contract args + the eight
-	// engine args (81 + filtType before the §flt core and the §env union joined)
-	say.(d.allControlNames.size == 107, "107 controls, the same list as every variant");
+	// §1 EVERY VARIANT DECLARES THE SAME CONTROLS. Not a typed number: this check
+	// carried the literal 107 and went stale the moment a control joined the unit
+	// (measured: the count has been 108 since the drawn-curve change, and the
+	// check has read FAIL ever since — invisibly, because nothing runs sc/nrt).
+	// The base variant IS the contract, so the base is what every other variant
+	// is compared against, name for name. A number cannot rot; a set can only be
+	// wrong if the engine is.
+	say.(d.allControlNames.size == baseNames.size,
+		"% controls, as many as the base variant".format(baseNames.size));
+	say.(d.allControlNames.collect(_.asSymbol).as(IdentitySet) == baseNames,
+		"the same control NAMES as the base variant%".format(
+			if (d.allControlNames.collect(_.asSymbol).as(IdentitySet) == baseNames) { "" } {
+				" — only here: " ++ d.allControlNames.collect(_.asSymbol).reject { |k| baseNames.includes(k) }.sort
+					++ ", only in base: " ++ baseNames.asArray.reject { |k| d.allControlNames.collect(_.asSymbol).includes(k) }.sort }));
 };
 // GrainBuf's maxGrains is an INSTANTIATION argument (§1.0), so the `grains` opt
 // has to land in the graph as a literal and two caps must give two graphs.
@@ -79,6 +111,13 @@ headCheck = { |d, expMode, expSpan, expPtr = 6|
 	var g = d.children.detect { |u| u.class == GrainBuf };
 	g !? { g.inputs.last }
 };
+// The contract's yardstick: the control names of the BASE samplerU variant, the
+// one every opt combination must agree with (sc/f2units.scd's generator rule
+// "every variant must declare the same control set").
+baseNames = topEnvironment.use {
+	topEnvironment[\f2UnitGen][\samplerU].value((), \f2NrtBaseProbe)
+}.allControlNames.collect(_.asSymbol).as(IdentitySet);
+("  base variant: " ++ baseNames.size ++ " controls — the yardstick for every variant below").postln;
 "  def                                     /f2_head + contract                      verdict".postln;
 defs = [
 	[(play: 'fragments'), 4, \span],                                 // 0 the mode itself
@@ -187,26 +226,36 @@ cases = [
 	(n: "cap 16 (capped)",   d: 6, b: bClick, m: \rate, e: 70,
 		a: ['grainSize', 0.2, 'density', 20, 'pos', 0.35]),
 	// MOTION: the grains fall off the burst as their positions spread
-	(n: "motion 0",         d: 1, b: bChirp, m: \spread, e: 0,
+	(n: "motion 0",         d: 1, b: bChirp, m: \spread, e: 0, hi: 150,
 		a: ['grainSize', 0.05, 'density', 1, 'pos', 0.45, 'grainEnv', 1, 'motion', 0]),
-	(n: "motion 2",         d: 1, b: bChirp, m: \spread, e: 250,
+	(n: "motion 2",         d: 1, b: bChirp, m: \spread, e: 250, hi: 700,
 		a: ['grainSize', 0.05, 'density', 1, 'pos', 0.45, 'grainEnv', 1, 'motion', 2]),
-	(n: "motion 8",         d: 1, b: bChirp, m: \spread, e: 700,
+	(n: "motion 8",         d: 1, b: bChirp, m: \spread, e: 700, hi: 1400,
 		a: ['grainSize', 0.05, 'density', 1, 'pos', 0.45, 'grainEnv', 1, 'motion', 8]),
 	// REPEATS: a head that advances, one grain per window, so a repeat is an
 	// adjacent grain that is the SAME waveform — (repeats − 1) of every
 	// `repeats` adjacent pairs when Repeat at Initial Position is on, none when
 	// it is off.
+	// SPEED 1, not 0.25. The head advances `speed · grainSize / density` of
+	// MATERIAL per grain and a grain reads `grainSize` of it, so two adjacent
+	// grains are distinct only while speed ≥ density. At speed 0.25 they shared
+	// 75 % of their material and correlated at 0.93 — over the 0.8 threshold —
+	// so `rep 1` and `rep 4 follow` read «1.0 same» and only passed because the
+	// clobbered grain envelope was destroying the correlation again. Measured
+	// adjacent-pair correlation with a correct window: 0.93 at speed 0.25, 0.22
+	// at 0.5, 0.13 at 1. Above 1 the head reaches the end of the 0.5 s buffer
+	// inside the measured span and PARKS, which makes every later pair identical
+	// (0.43 «same» at speed 2), so 1 is the one value that works.
 	(n: "rep 1",            d: 0, b: bNoise, m: \grains, e: 0.0,
-		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 0.25]),
+		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 1]),
 	(n: "rep 2 INIT",       d: 0, b: bNoise, m: \grains, e: 0.5,
-		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 0.25,
+		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 1,
 			'repeats', 2, 'repeatInit', 1]),
 	(n: "rep 4 INIT",       d: 0, b: bNoise, m: \grains, e: 0.75,
-		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 0.25,
+		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 1,
 			'repeats', 4, 'repeatInit', 1]),
 	(n: "rep 4 follow",     d: 0, b: bNoise, m: \grains, e: 0.0,
-		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 0.25,
+		a: ['grainSize', 0.05, 'density', 1, 'grainEnv', 1, 'speed', 1,
 			'repeats', 4, 'repeatInit', 0]),
 	// GRAIN PLAYBACK DIRECTION: a frozen head, contiguous grains and a symmetric
 	// window, so SMPL reads [pos, pos+gsz) forwards and HEAD under `reverse`
@@ -365,14 +414,31 @@ analyse = {
 			\spread, {
 				// the standard deviation of the grains' own pitches: with the head
 				// frozen it is nothing but Motion
-				var f = (3 .. 16).collect { |k| zcr.value(win.value(i, 0.033 + (k * 0.05), 0.057 + (k * 0.05))) };
+				// The windows STOP AT k = 14 (0.733…0.757 s). The gate closes at 0.80
+				// with a 50 ms release, so k = 15 sat in the release and k = 16 in
+				// SILENCE — and the zero-crossing rate of int16 dither is ~15 kHz.
+				// Measured: over k = 3…14 the motion-0 spread is EXACTLY 0 Hz; the
+				// «± 726 Hz» this case used to report was the single dead window.
+				var f = (3 .. 14).collect { |k| zcr.value(win.value(i, 0.033 + (k * 0.05), 0.057 + (k * 0.05))) };
 				var mu = f.sum / f.size;
+				var onChirp;
 				v = ((f.sum { |q| (q - mu).squared }) / f.size).sqrt;
-				// a frozen head reads the same span every grain, so what is left at
-				// motion 0 is the zero-crossing estimate's own noise (± one crossing
-				// in a 20 ms window is ± 25 Hz); anything above that is Motion
-				ok = if (c[\e] == 0) { v < 150 } { v > c[\e] };
-				shown = "pitch % ± % Hz".format(mu.round(1), v.round(1));
+				// FIRST: the windows must be on the CHIRP at all. A grain read forwards
+				// from pos 0.45 is 2020…2380 Hz, and the MEAN stays there at every
+				// Motion because the throw is symmetric about the head — so a mean
+				// outside 1800…2700 Hz means the measurement is not reading the
+				// material, whatever spread it then computes.
+				onChirp = (mu > 1800) and: { mu < 2700 };
+				// THEN the spread, bounded on BOTH sides. A lower bound alone PASSES ON
+				// NOISE: motion 2 and motion 8 read «ok» for months off aliasing they
+				// were never pointed at. The bands are the uniform throw's own sd —
+				// ± motion · gsz of the file is ± motion · 0.1 here, so ±0.2 of a
+				// 400…4000 Hz ramp is 1440/√12 ≈ 416 Hz and the wrapped ±0.8 is
+				// 3600/√12 ≈ 1039 Hz (measured: 449 and 1095).
+				ok = onChirp and: { if (c[\e] == 0) { v < c[\hi] }
+					{ (v > c[\e]) and: { v < c[\hi] } } };
+				shown = "pitch % ± % Hz%".format(mu.round(1), v.round(1),
+					if (onChirp) { "" } { " — NOT the chirp" });
 			},
 			\tail, {
 				var w = (0.01 * sr).asInteger, e, mx, thr, last = 0;

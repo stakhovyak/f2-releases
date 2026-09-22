@@ -217,7 +217,13 @@ analyse = {
 			(data[j] + data[j + 1]) * 0.5
 		})
 	};
-	if (sf.isNil) { "### could not open the render".postln; 1.exit };
+	// `1.exit` is DEFERRED in this build: the quit reaches the event loop, not the
+	// interpreter, so the measuring body below still runs on a nil file and the script
+	// ends in an error dump rather than a verdict. The marker is printed FIRST so a
+	// reader sees the cause above the dump, and CI fails the job on the missing
+	// closing verdict as well as on this line (.github/workflows/ci.yml, job engine).
+	if (sf.isNil) { "### could not open the render".postln;
+		"### CYCLES CHECK FAILED".postln; 1.exit };
 	nf = sf.numFrames; nch = sf.numChannels;
 	data = FloatArray.newClear(nf * nch);
 	sf.readData(data); sf.close;

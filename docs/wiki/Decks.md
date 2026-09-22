@@ -43,6 +43,12 @@ reload of something else. A deck whose cards changed is rebuilt; its tail starts
 
 Bypass is a switch: a bypassed card leaves the compiled deck and keeps its knobs.
 
+The **code panel** shows the decks too. With no row playing it shows the editor's own
+program, and that program used to be compiled without any decks at all — so a tree that
+plainly carried a deck read as a program with an empty deck list and cells wired straight to
+the rack bus, which is not what the row would have played. It now carries the same decks, on
+the same values, keyed under the editor's own row and scene prefix.
+
 ---
 
 ## 3. What a deck hears — the routing rule
@@ -92,6 +98,12 @@ composed by one rule, the strip's post-card rule taken one level up:
 - a layer exists only while its scope's [[window|Windows]] is open, as always.
 
 Preset-scope layers do not reach a deck: a preset's modulators are about the preset.
+And the other way round: a deck's own base value never reaches a cell. It used to — a deck
+card and a preset chain card get the same id by default when they hold the same unit (both
+are named after it), the two share the `<cardId>.<param>` spelling, and a deck's scope is an
+ancestor of every cell under it, so a cell could read the deck's knob as if it were its own.
+Two cells of one preset under two decks then resolved to two different values, which no
+shared key can carry.
 
 In the deck panel the ghost of a deck knob follows that one value; there is never more than
 one needle, because there is never more than one instance.
@@ -124,8 +136,9 @@ selected) the panel falls back to the preset.
 A node's deck is the same strip: `+` slots, cards with knobs, drag by the bar, ⌥← ⌥→, ⌫,
 `b`. There is no preset card (no bare freq / amp, no macros), no divider (every deck card is
 already a singleton) and no scope-bus row. A deck card is the **same card** as in a preset's
-strip: a processor draws its four bands — IN, the unit's own, ENV, EQ — with the same cells,
-captions, tooltips and colours, and a unit without a body of its own keeps the knob grid.
+strip: a processor draws its three bands — the unit's own row (headed by the input group:
+the primary port, then `gain · damp · sat`), ENV, EQ — with the same cells, captions,
+tooltips and colours, and a unit without a body of its own keeps the knob grid.
 Only the holder differs: every control reads and writes the node's (or the block's) deck
 params instead of a preset's. A deck knob takes the same right-button modulation menu and
 the same arm tooltip as a strip knob (§4, [[Arm Kinds|Arm-Kinds]] §9).
@@ -143,12 +156,17 @@ it can be read and cleared.
 
 - A deck card has **no port inputs**, no telemetry output and no resource buffers; a
   processor that needs a port (a vocoder's modulator input) belongs in a strip. The card
-  body is the strip's (§5), but its port cells are not drawn — the IN band and the unit's
-  own band hold their knobs alone.
+  body is the strip's (§5), but its port cells are not drawn — the input group at the head of
+  the unit's own row starts at its `gain` knob, and the row holds no secondary port either.
 - In **bake** mode the deck's values are baked into the node at build; in live mode they are
   mapped to the delivered keys.
 - If the server cannot allocate the deck's bus, the engine says so in the post window once
   and the cells under that deck **bypass it** — they go to the bus they would otherwise go to.
+- A deck that disappears from a redeploy loses its nodes at once but keeps its **bus** for
+  the length of a voice release (`0.4` beats, plus a tenth of a second) before the index goes
+  back to the allocator. The redeploy gates the row's notes just before it syncs the decks and
+  they are still writing this deck's input for those beats: handing the index straight back
+  put the dying notes into whatever took it next — another deck, in any row, or a rack bus.
 - Effect locks (`+fx`) stay what they are: rack effects. A deck does not replace the rack.
 
 See also: [[Card Chains|Card-Chains]] §9, [[Tree Operators|Tree-Operators]] "Node properties",

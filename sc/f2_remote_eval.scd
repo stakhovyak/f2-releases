@@ -1,8 +1,51 @@
 if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     "✗ REMOTE EVAL ABORT: DSL not loaded. ~play/~toPat/~enrich nil.".postln;
 } {
-    if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying }) { ~f2PatGroup.freeAll };
+    // §pat-gen the bookkeeping of a generation that is really gone. Every pooled
+    // voice and every voice subgroup hangs off the pattern group, so when the
+    // group goes they are all dead nodes: keeping them would have the next deploy
+    // reuse a pool of corpses (the §reuse failure in f2dsl.scd — a flood of
+    // «/n_mapn Node not found», and silence). It is defined FIRST because the
+    // reload right below is one of the three places a generation ends, and it
+    // ends it for real: /n_free on a group takes its children silently.
+    ~f2PatGroupDrop = {
+        topEnvironment[\f2Voices] !? { |v| v.clear };
+        topEnvironment[\f2VGrp2] !? { |d| d.clear };
+        topEnvironment[\f2VGroups] = nil;
+    };
+    // §pat-gen NEVER ASK A CLIENT-MADE NODE WHETHER IT IS PLAYING. Node:isPlaying
+    // starts false and is only ever set by NodeWatcher, so the old guard here —
+    // `if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying })` — was false for
+    // every group this file ever made and the reload freed nothing. Free by
+    // nodeID with the error suppressed instead: the node may be gone (a reload
+    // after CmdPeriod) and that is not worth a message.
+    // The stamp is what tells the three cases apart, and only two of them act.
+    // Same allocator: the group is ours and on this server — end it, then drop
+    // what named its children. A DIFFERENT allocator: the server rebooted, so
+    // those nodes are already gone AND the id now belongs to whatever the new
+    // allocator has handed out — forget the generation, never free it (the rule
+    // f2units §bus-gen states for a bus that outlived s.newBusAllocators). No
+    // stamp at all: a group made by an engine that predates this file, on a
+    // server that is still running — leave it exactly as it was, because its
+    // voices are alive and the registries are the only way to reach them.
+    ~f2PatGroup !? { |g|
+        ~f2PatGroupAlloc !? { |a|
+            if (a === s.nodeAllocator) {
+                s.sendBundle(nil, [\error, 0], [\n_free, g.nodeID], [\error, 1]);
+            };
+            ~f2PatGroupDrop.value;
+        };
+    };
+    // §pat-gen the group is REGISTERED now (see the drain below): a registered
+    // group's isPlaying is the NodeWatcher's answer about the real node, which is
+    // what tells a live group from one CmdPeriod took away. The allocator identity
+    // and the creation stamp cover what the watcher cannot: a server reboot hands
+    // out the same ids again, and a group whose /n_go has not landed yet is not
+    // dead, it is young.
     ~f2PatGroup = Group.head(s.defaultGroup);
+    ~f2PatGroup.register(true);
+    ~f2PatGroupAlloc = s.nodeAllocator;
+    ~f2PatGroupAt = Main.elapsedTime;
     "[f2re] ~f2PatGroup → node %".format(~f2PatGroup.nodeID).postln;
 
     // §layers/quant: DO NOT rewrite ~play — the DSL version already does all of it (group,
@@ -26,11 +69,97 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     ~f2Bridge = (busy: false, busyAt: 0);
     ~f2EvalQ = List.new;
 
+    // §smooth-life THE SMOOTHERS DIE WITH THE PANIC AND NOBODY REBUILT THEM.
+    // f2_modsmooth builds one \f2_msmooth synth per modulated key — VarLag from
+    // the key's raw control bus onto its smoothed one, all of them in
+    // ~f2SmGroup — and every consumer reads the SMOOTHED bus (~mbAt prefers
+    // ~mbSm[k]). CmdPeriod frees every node on the server, so the group and all
+    // of those synths are gone, while the client-side ~mbSyn/~mbSm dictionaries
+    // go on holding the corpses — and ~f2FlagApply only ever builds a smoother
+    // when ~mbSyn[k] is NIL, so it never rebuilt one. Measured live over the
+    // real OSC paths: before the panic raw 0.25 / smoothed 0.25, then /f2_setb
+    // 0.75 put both at 0.75; after CmdPeriod.run, /f2_setb 0.1 gave raw 0.1 and
+    // smoothed 0.75 — every smoothed knob of the session frozen until the engine
+    // was restarted, with nothing on the client to show for it (the server's own
+    // log said «/n_set Node 1001 not found» and, for a key flagged afterwards,
+    // «/s_new Group 1000 not found», leaving that key's smoothed bus at 0.0).
+    // THE BUSES ARE KEPT AND ONLY THE NODES REBUILT: a §post static map
+    // (f2dsl ~f2StaticMapAdd) is mapped ONCE onto ~mbSm[k].index, so reallocating
+    // here would point every one of them at a stranger's bus.
+    // AND THE REBUILT SEGMENT TAKES BACK THE KEY'S OWN LAG, not ~mbLag for
+    // everybody. The core's flags are EDGE-TRIGGERED — conductor.go sends a
+    // flag only when it differs from the last one it sent (rs.lastFlags,
+    // fxLastFlags) and a channel gate's «smooth off» exactly ONCE per session
+    // (gateFlagsSent) — so a key whose flag is 0 never hears about it again.
+    // Rebuilding every segment at ~mbLag therefore does not cost one frame, it
+    // costs the rest of the session: every gateSrc key (f2dsl §synth-mod maps
+    // the voice's \gate onto ~mbAt of that key, which IS the smoothed bus once
+    // the core's one flag 0 has built a segment for it) would come back from a
+    // panic with a 1/60 s = 16.7 ms VarLag on a GATE instead of its 0.0002 s.
+    // Hence ~mbFlagLast: the flag last applied per key, stamped where this file
+    // already applies them (the /f2_frame handler, §9 below). A key that was
+    // never flagged through a frame — the transitional /f2_setflags path, whose
+    // OSCdef lives in f2_modsmooth.scd — is unknown here and keeps the old
+    // behaviour, ~mbLag.
+    ~mbFlagLast = ~mbFlagLast ? IdentityDictionary.new;
+    ~f2SmoothRevive = {
+        var sm = topEnvironment[\mbSm], syn = topEnvironment[\mbSyn];
+        var rawAt = topEnvironment[\mbRawAt];
+        var lastFl = topEnvironment[\mbFlagLast];
+        topEnvironment[\f2SmoothDead] = false;
+        if (sm.notNil and: { syn.notNil } and: { rawAt.notNil } and: { s.serverRunning }) {
+            var g, n = 0;
+            // the previous group first, by nodeID with the error suppressed: after a
+            // panic it is already gone and that is not worth a message, but this file
+            // adds a CmdPeriod hook on every reload, so a second hook would otherwise
+            // build a second group over the first and leave one smoother per key
+            // running with nobody holding it.
+            topEnvironment[\f2SmGroup] !? { |old|
+                s.sendBundle(nil, [\error, 0], [\n_free, old.nodeID], [\error, 1]);
+            };
+            g = Group.head(s.defaultGroup);
+            g.register(true);
+            topEnvironment[\f2SmGroup] = g;
+            syn.clear;
+            sm.keysValuesDo { |k, b|
+                var raw = rawAt.value(k);
+                if (b.notNil and: { raw.notNil }) {
+                    var fl = (lastFl !? { |d| d[k] }) ? 1;      // unknown ⇒ smoothed, the old behaviour
+                    syn.put(k, Synth(\f2_msmooth,
+                        [\raw, raw.index, \out, b.index,
+                         \lag, if (fl > 0.5) { topEnvironment[\mbLag] ? (1/60) } { 0.0002 }],
+                        g));
+                    n = n + 1;
+                };
+            };
+            if (n > 0) { "[f2] % parameter smoothers rebuilt after the panic".format(n).postln };
+        };
+    };
+
     // §eval-drain v2 CmdPeriod (panic) clears the clocks and kills the drain routine WITHOUT
     // raising — busy stayed true forever, and every later /f2/eval from the core queued up
     // silently behind nobody: deploys never ran and the core reported «no /f2_ack for epoch N»
     // until a full restart. The hook resets busy itself.
-    CmdPeriod.add({ topEnvironment.use { ~f2Bridge.busy = false } });
+    // §pat-gen a CmdPeriod frees every node on the server, so the pattern group,
+    // its voice subgroups and every pooled voice are gone: say so here rather
+    // than waiting for the watcher, and let the next deploy build a generation.
+    CmdPeriod.add({ topEnvironment.use {
+        ~f2Bridge.busy = false;
+        ~f2PatGroup = nil;
+        ~f2PatGroupDrop !? { |f| f.value };
+        // §smooth-life the smoothers go with every other node, and the rebuild
+        // CANNOT happen right here: CmdPeriod.run calls its hooks FIRST and
+        // Server.freeAll (/g_freeAll, then initTree) only afterwards, so a group
+        // made in this breath is freed a moment later. Arm it on the clock
+        // instead — the clocks are cleared BEFORE the hooks run, so a schedule
+        // made here survives — and mark it, so the next deploy retries the
+        // rebuild if that one wake is ever lost.
+        ~f2SmoothDead = true;
+        SystemClock.sched(0.5, {
+            topEnvironment.use { ~f2SmoothRevive !? { |f| f.value } };
+            nil
+        });
+    } });
 
     OSCdef(\f2_eval, { |msg|
         var code = msg[1].asString;
@@ -61,18 +190,42 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
                 // lazily, if it does not exist yet.
                 Routine({
                     topEnvironment.use {
-                        if (~f2PatGroup.isNil or: { ~f2PatGroup.isPlaying.not }) {
-                            // §grp-gen DO NOT FREE THE PREVIOUS GROUP HERE. It does pile up —
-                            // the freeAll branch above sits behind .isPlaying and the group is
-                            // created without .register(true), so isPlaying is always false for
-                            // it — but freeing a group kills its children SILENTLY: /n_free on a
-                            // group sends no /n_end per node, the voice registries keep
-                            // isPlaying = true on dead nodes, and the next deploy maps them: a
-                            // flood of «/n_mapn Node not found», and silence. That is the exact
-                            // failure written up in f2dsl.scd §reuse. The stack-bus generations
-                            // this leaves behind are swept by §bus-gen instead; the nodes are
-                            // left alone.
+                        // §pat-gen ONE PATTERN GROUP PER SESSION. This used to read
+                        // `~f2PatGroup.isNil or: { ~f2PatGroup.isPlaying.not }`, and
+                        // isPlaying is false for every group this file makes (it was
+                        // never registered), so the branch fired on EVERY deploy: 41
+                        // evals measured 41 groups on the server, one abandoned per
+                        // deploy, plus one voice subgroup per playing pool — 17 nodes a
+                        // deploy with 16 pools, which is ~480 deploys from
+                        // s.options.maxNodes (8192, f2_boot.scd). Past that ceiling
+                        // /g_new fails, every /s_new into the named group is rejected
+                        // and sclang raises nothing: the app goes silent behind a green
+                        // ack. Registered, the guard now fires only when the group is
+                        // REALLY gone (CmdPeriod, a server reboot), and then the stale
+                        // registries go first — freeing a group kills its children
+                        // silently, and a pool of dead nodes is the §reuse failure in
+                        // f2dsl.scd: a flood of «/n_mapn Node not found», and silence.
+                        // §node-live and the other half of the same question: a group
+                        // whose /g_new the server REFUSED (its parent gone, maxNodes
+                        // reached) also reads isPlaying true for ever, because no /n_go
+                        // and no /n_end will come — so this branch never fired, every
+                        // deploy spawned into a group that does not exist, each refused
+                        // voice was kept in its pool and mapped again on every event
+                        // («/n_mapn Node N not found» once per parameter per event) and
+                        // the app was silent behind a green ack. ~f2NodeLive (f2dsl)
+                        // asks for the server's own confirmation once the node is past
+                        // the grace; without f2dsl the old test stands.
+                        if (~f2PatGroup.isNil
+                            or: { ~f2PatGroupAlloc !== s.nodeAllocator }
+                            or: { if (~f2NodeLive.notNil)
+                                { ~f2NodeLive.(~f2PatGroup, ~f2PatGroupAt).not }
+                                { ~f2PatGroup.isPlaying.not
+                                    and: { (Main.elapsedTime - (~f2PatGroupAt ? 0)) > 1 } } }) {
+                            ~f2PatGroupDrop !? { |f| f.value };
                             ~f2PatGroup = Group.head(s.defaultGroup);
+                            ~f2PatGroup.register(true);
+                            ~f2PatGroupAlloc = s.nodeAllocator;
+                            ~f2PatGroupAt = Main.elapsedTime;
                             "[f2] patGroup recreated".postln;
                         };
                     };
@@ -84,7 +237,24 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
                             ~f2Bridge.busyAt = Main.elapsedTime;   // §eval-drain v2 watchdog pulse
                         };
                         topEnvironment.use {
-                            try { c.interpret; "✓ F2 eval ok".postln; }
+                            // §smooth-life the belt to the CmdPeriod hook's braces: if the
+                            // scheduled rebuild never ran (a clock cleared under it, a server
+                            // that was still down at 0.5 s), the next deploy does it — before
+                            // the program, whose base-init writes values through those buses.
+                            if (~f2SmoothDead == true) { ~f2SmoothRevive !? { |f| f.value } };
+                            // §port-life the deploy bracket. The preamble ensures every port
+                            // of the WHOLE session (the compiler walks all presets), so the
+                            // names it did NOT stamp are ports the session no longer owns and
+                            // the sweep at the end retires them — but only for a program that
+                            // ensured at least one port, and only if it ran to the end: a
+                            // half-interpreted deploy has named half its ports.
+                            // §bus-ceil a pool that was dry during the LAST program may
+                            // have room now (a smaller row, a server reboot): every program
+                            // gets one honest attempt, and one line if it fails again.
+                            ~f2ModBusRearm !? { |f| f.value };
+                            ~f2PortDeployBegin !? { |f| f.value };
+                            try { c.interpret; "✓ F2 eval ok".postln;
+                                  ~f2PortDeployEnd !? { |f| f.value }; }
                                 { |err| ("✗ F2 eval: " ++ err.errorString).postln };
                             ~f2Bridge.busyAt = Main.elapsedTime;
                         };
@@ -99,7 +269,31 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
     OSCdef(\f2_hush, { |msg|
         "[f2] /hush".postln;
         { topEnvironment.use { Pdef.all.do(_.stop);
-            if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying }) { ~f2PatGroup.freeAll };
+            // §hush-free THE PANIC BUTTON FREED NOTHING. This was
+            // `if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying }) { freeAll }`
+            // and isPlaying is a NodeWatcher guess that was false for this group
+            // for the whole session (§pat-gen above): measured on a live server,
+            // two gate-1 voices in the group survived /f2/hush and died the
+            // instant freeAll was called by hand. So free by nodeID, error
+            // suppressed — the group may already be gone and a panic must not
+            // stop half way.
+            ~f2PatGroup !? { |g| s.sendBundle(nil, [\error, 0], [\g_freeAll, g.nodeID], [\error, 1]) };
+            // §hush-free and the POOLED voices, which is where they actually are:
+            // ~play took the same dead isPlaying for an answer and spawned every
+            // voice into s.defaultGroup, outside any freeAll of the pattern group.
+            // The registry is the only route to those, and it is emptied — a hush
+            // that left the pools behind would have the next deploy reuse a pool
+            // of dead nodes (§reuse).
+            ~f2Voices !? { |vs|
+                vs.values.asArray.do { |pool|
+                    (pool[\synths] ? []).do { |sy|
+                        var nid = (sy.notNil and: { ~f2VNode.notNil }).if { ~f2VNode.(sy) };
+                        nid !? { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) };
+                    };
+                    pool[\post] !? { |p| ~f2FreePost !? { |f| f.value(p) } };
+                };
+                vs.clear;
+            };
             // §scope-deck the decks (f2dsl §scope-deck) live OUTSIDE the pattern group, in
             // ~f2DeckGroup after it, so freeAll leaves them running: every deck of every row
             // goes with the voices (groups, buses, static maps, registry).
@@ -221,7 +415,13 @@ if (~play.isNil or: { ~toPat.isNil } or: { ~enrich.isNil }) {
                 apply = {
                     topEnvironment.use {
                         if (~f2FlagApply.notNil) {
-                            forBy(0, flags.size - 2, 2) { |j| ~f2FlagApply.(flags[j], flags[j + 1]) };
+                            forBy(0, flags.size - 2, 2) { |j|
+                                // §smooth-life the flag is recorded, not only applied: the core
+                                // sends each one ONCE (edge-triggered, see ~f2SmoothRevive), so
+                                // this record is the only place the lag of a key survives a panic.
+                                ~mbFlagLast !? { |d| d.put(flags[j], flags[j + 1]) };
+                                ~f2FlagApply.(flags[j], flags[j + 1]);
+                            };
                         };
                         // values go to the RAW bus when modsmooth is loaded (its smoother draws
                         // the smooth one itself), otherwise to the plain ~mbAt (as /f2_setb does).

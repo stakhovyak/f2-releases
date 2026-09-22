@@ -88,6 +88,84 @@ topEnvironment.use {
 	};
 };
 ~f2Ports = IdentityDictionary.new;
+// §port-life and the entries already RETIRED but not yet freed (the park list of
+// ~f2PortRetire): a reload throws the registry away, and a parked entry is off
+// that registry already, so without this its 64 channels would be the one leak
+// the rest of this block exists to stop. The scheduled drain that would have
+// freed them is dropped with the list — it only ever frees what is still in it.
+(~f2PortsParked ? []).do { |e|
+	e[\commit] !? { |c| try { c.free } };
+	if (e[\alloc] === s.audioBusAllocator) {
+		e[\rbus] !? { |b| if (b !== e[\bus]) { try { b.free } } };
+		e[\bus]  !? { |b| try { b.free } };
+	};
+};
+~f2PortsParked = [];
+
+// ── §sc-deps THE OPTIONAL EXTENSION PACK, REACHED BY NAME ─────────────────
+//
+// Four of the UGens this file plays are not in SuperCollider's core class
+// library: `SVF` (the Blackrain state-variable filter, four of the eleven
+// filter models) and `PV_RecordBuf` / `PV_BufRd` / `PV_XFade` (the sampler's
+// spectral mode). They ship in sc3-plugins, which the owner of a machine may
+// or may not have installed.
+//
+// WHY THEY ARE NOT NAMED LITERALLY. sclang resolves a class name at COMPILE
+// time, not when the branch runs. A literal `SVF.ar(…)` inside a graph nobody builds
+// still costs the WHOLE FILE: without the pack this file raised thirteen
+// "Class not defined" errors and compiled to nil, so the engine had no units
+// at all — not one synth, not one processor — while the runtime capability
+// check below sat there promising a graceful fallback it could never deliver.
+// A runtime `if` cannot guard a compile-time reference. A name can: a symbol
+// is data, `asClass` answers nil when the class is absent, and the file
+// compiles on a stock install either way.
+//
+// WHAT DEGRADES WITHOUT THE PACK: the four filter models that need `SVF` are
+// dropped from ~f2FltBuilt (a card that asks for one is told once and gets
+// the unit's default model, the ~f2FltResolve path that already exists for a
+// value with no arm), and the sampler's spectral mode falls back to Warp1
+// (~f2SmpPV, below). Everything else is core and plays as it always did.
+//
+// THE CHECK THAT KEEPS IT TRUE: sc/nrt/extdeps.scd fails if any class named
+// literally in sc/*.scd is outside the core library of the SuperCollider that
+// runs it, and the front's own suite pins the same thing against the
+// committed list sc/nrt/core-classes.txt — so a new literal `SVF.ar` cannot
+// walk back in unnoticed.
+~f2ExtNeeds = (
+	svf: #[\SVF],                                    // filter models sk / svf / fizz / ripple
+	pv:  #[\PV_RecordBuf, \PV_BufRd, \PV_XFade]       // the sampler's spectral analysis and playback
+);
+// The models each capability carries. Read by the ~f2FltBuilt filter below and
+// by the offline check, so a fifth model reaching for SVF is one line here.
+~f2ExtFltModels = (svf: #[\sk, \svf, \fizz, \ripple]);
+~f2ExtHas = { |cap| (topEnvironment[\f2ExtNeeds][cap.asSymbol] ? #[]).every { |k| k.asClass.notNil } };
+~f2ExtMissing = ~f2ExtNeeds.keys.asArray.sort.select { |cap| ~f2ExtHas.(cap).not };
+// The call itself: `~f2Ext.(\SVF, \ar, [args])`. performList and not a literal
+// — that is the whole point — and an Error rather than silence if it is ever
+// reached without the class, which cannot happen while the capability gates
+// above hold: a build failure is caught by ~f2UnitDef and falls back to the
+// base def with a warning, whereas a silent substitution would be a filter
+// nobody picked.
+~f2Ext = { |name, sel, args|
+	var cls = name.asClass;
+	if (cls.isNil) {
+		Error("~f2Ext: % is not installed (sc3-plugins) — this graph must not have been built; "
+			"~f2ExtHas / ~f2FltBuilt are what decide that".format(name)).throw;
+	};
+	cls.performList(sel, args)
+};
+// The two spellings the sites need, so a call site reads like the UGen it is.
+~f2Svf = { |...args| topEnvironment[\f2Ext].(\SVF, \ar, args) };
+~f2PvRecordBuf = { |...args| topEnvironment[\f2Ext].(\PV_RecordBuf, \new, args) };
+~f2PvBufRd = { |...args| topEnvironment[\f2Ext].(\PV_BufRd, \new, args) };
+~f2PvXFade = { |...args| topEnvironment[\f2Ext].(\PV_XFade, \new, args) };
+if (~f2ExtMissing.size > 0) {
+	("⚠ [f2 deps] sc3-plugins capabilities missing: % — the engine loads, and what they carry does not: %".format(
+		~f2ExtMissing,
+		~f2ExtMissing.collect { |cap|
+			(topEnvironment[\f2ExtNeeds][cap]).asString ++ if (cap == \svf) { " (filter models sk svf fizz ripple)" } { " (sampler spectral → Warp1)" }
+		})).postln;
+};
 // §cards/§stack the STAGE / route bus registry (~f2StackBusAt in f2dsl) is
 // reset the same way: its buses were allocated before s.newBusAllocators too,
 // so a stale entry could overlap a fresh port bus. Every pool respawns on its
@@ -130,12 +208,115 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 ~f2PortSum = ~f2PortSum ? true;
 ~f2PortCommitG = {
 	var g = topEnvironment[\f2PortCG];
-	if (g.isNil or: { g.isPlaying.not }) {
+	// §node-live (f2dsl ~f2NodeLive) isPlaying alone also believed a group whose
+	// /g_new the server refused — it reads true for ever, the commit node was
+	// never rebuilt and every port stayed silent. Without f2dsl the old test
+	// stands, which is the behaviour this file had on its own.
+	var live = topEnvironment[\f2NodeLive];
+	var ok = if (live.notNil) { live.(g, topEnvironment[\f2PortCGAt]) } { g.notNil and: { g.isPlaying } };
+	if (ok.not) {
 		g = Group.tail(s.defaultGroup);
 		g.register(true);
 		topEnvironment[\f2PortCG] = g;
+		topEnvironment[\f2PortCGAt] = Main.elapsedTime;
 	};
 	g
+};
+// §port-life THE NAME THAT STOPS BEING DEPLOYED. The compiler walks the WHOLE
+// session's preset list and emits one `~f2PortEnsure.(\name, wv);` per port on
+// EVERY deploy of EVERY row (src/lib/compiler.ts §synth-mod, core/compiler
+// mirror), so the names in one deploy preamble ARE the ports the session still
+// owns. Nothing ever removed the others: renaming a port ten times left ten
+// entries, and each entry holds two 32-channel buses (W and R) plus a commit
+// node. Measured live: a fresh 32-channel bus landed at index 6 with an empty
+// registry, at 646 after ten names, and three further deploys naming only the
+// tenth left all ten entries and the watermark exactly where it was — 64
+// channels of s.options.numAudioBusChannels (16384, f2_boot.scd) gone per
+// rename for the rest of the session. Past that ceiling ~f2PortEnsure's own
+// §port-nil path bypasses the port and the audio simply stops arriving.
+// So a deploy is now BRACKETED (~f2PortDeployBegin / ~f2PortDeployEnd, called
+// by the eval drain in f2_remote_eval.scd): every ensure stamps the epoch, and
+// at the end of the deploy the entries that were not stamped are retired.
+// TWO RULES KEEP THAT SAFE. (a) The sweep runs only for a deploy that ensured
+// at least ONE port — /f2/eval also carries a project's content boot, a hundred
+// SynthDefs naming no port at all, and reading that as «the session has no
+// ports any more» would free every live port in the middle of a set. (b) The
+// buses are PARKED, not freed on the spot: a voice of the removed preset may
+// still be playing out its release into that W bus, and handing the index to
+// the next allocation under it is the fault live-decks.scd measures at 0.4345
+// of someone else's signal. Same shape as ~f2StackBusRetire in f2dsl (§bus-park,
+// §park-eps): each entry carries its own due time on Main.elapsedTime, any later
+// retirement drains whatever has matured, and the drain re-arms itself while
+// anything is still parked — so one lost wake costs nothing.
+~f2PortsParked = ~f2PortsParked ? [];
+~f2PortEpoch = ~f2PortEpoch ? 0;
+~f2PortTouched = false;
+// §bus-gen freeing a port entry, under the allocator stamp: an entry that
+// outlived s.newBusAllocators points at indices from a previous life and
+// handing those back to the new allocator would be a gift of someone else's
+// live block — such an entry is forgotten, not freed. The commit node goes with
+// the buses, not before them: while the pair is parked it still carries W→R for
+// whatever is releasing into it.
+~f2PortRel = { |e|
+	if (e.notNil) {
+		e[\commit] !? { |c| try { c.free } };
+		e[\commit] = nil;
+		if (e[\alloc] === s.audioBusAllocator) {
+			e[\rbus] !? { |b| if (b !== e[\bus]) { try { b.free } } };
+			e[\bus]  !? { |b| try { b.free } };
+		};
+		e[\bus] = nil; e[\rbus] = nil;
+	};
+};
+~f2PortRetire = { |e, delay = 0.5|
+	var drain;
+	if (e.notNil) {
+		e[\due] = Main.elapsedTime + delay;
+		topEnvironment[\f2PortsParked] = (topEnvironment[\f2PortsParked] ? []).add(e);
+	};
+	drain = {
+		var now = Main.elapsedTime, keep = [];
+		(topEnvironment[\f2PortsParked] ? []).do { |o|
+			// §park-eps the 0.01 tolerance and the re-arm are f2dsl's, for f2dsl's
+			// reason: the due time is PHYSICAL while the wake lands at the calling
+			// thread's LOGICAL seconds, and a caller inside `c.interpret` of a whole
+			// deploy program lags by however long that interpret took.
+			if ((o[\due] ? 0) <= (now + 0.01)) {
+				topEnvironment[\f2PortRel].value(o);
+			} {
+				keep = keep.add(o);
+			};
+		};
+		topEnvironment[\f2PortsParked] = keep;
+		if (keep.size > 0) {
+			SystemClock.sched((keep.collect { |o| o[\due] ? 0 }.minItem - now).max(0.01), drain);
+		};
+		nil
+	};
+	SystemClock.sched(delay, drain);
+};
+~f2PortDeployBegin = {
+	topEnvironment[\f2PortEpoch] = (topEnvironment[\f2PortEpoch] ? 0) + 1;
+	topEnvironment[\f2PortTouched] = false;
+};
+~f2PortDeployEnd = {
+	var dict = topEnvironment[\f2Ports];
+	var epoch = topEnvironment[\f2PortEpoch] ? 0;
+	// §bus-park «after the voices, plus a tenth» — the same denominator
+	// ~f2StackBusAfterBeats gives the stage buses, because the voices that read
+	// this port are freed on the same two clocks.
+	var delay = (topEnvironment[\f2StackBusAfterBeats] !? { |f| f.value(0.4) }) ? 0.5;
+	if (dict.notNil and: { topEnvironment[\f2PortTouched] == true }) {
+		dict.keys.asArray.do { |k|
+			var e = dict[k];
+			if (e.notNil and: { (e[\seen] ? -1) != epoch }) {
+				("[f2 port] % retired — no deploy names it any more".format(k)).postln;
+				dict.removeAt(k);
+				topEnvironment[\f2PortRetire].value(e, delay);
+			};
+		};
+	};
+	topEnvironment[\f2PortTouched] = false;
 };
 ~f2PortEnsure = { |name, writerV = 16|
 	var dict = topEnvironment[\f2Ports];
@@ -149,35 +330,75 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 		dict.removeAt(key);
 		e = nil;
 	};
+	// §port-nil AN EMPTY — OR MERELY FRAGMENTED — ALLOCATOR RETURNS NIL, and this
+	// used to write the nil entry into ~f2Ports and then read `.index` off it two
+	// lines down: «Message 'index' not understood», raised out of the MIDDLE of
+	// the deploy program, which the compiler emits as one parenthesised
+	// expression — so ~f2FreeSceneVoices, ~f2DeckSync and ~play never ran, the
+	// row's old voices kept their gates and the row never started. Worse, the
+	// wreck stayed cached and the reuse branch only ever retried `rbus`, so every
+	// later deploy of EVERY row threw at the same line for the rest of the
+	// session (the port preamble is built over all the presets). Measured: with
+	// the 32-channel class starved, ~f2StackBusAt (8 ch) and ~f2DeckBuild (4 ch)
+	// both still allocated happily — so this does not need an exhausted pool,
+	// only a fragmented one. Refuse the way those two already refuse: say it out
+	// loud, cache nothing, return nil.
 	if (e.isNil) {
-		e = (bus: Bus.audio(s, 32), rbus: Bus.audio(s, 32), wv: writerV.asInteger.clip(1, 16),
-			alloc: s.audioBusAllocator);
-		dict[key] = e;
+		var b = Bus.audio(s, 32), rb = Bus.audio(s, 32);
+		if (b.isNil or: { rb.isNil }) {
+			b !? { |x| x.free }; rb !? { |x| x.free };
+			("✗ f2: cannot allocate a port bus (32 ch) for % — the server's audio bus pool is exhausted; raise s.options.numAudioBusChannels and reboot the server. The port is bypassed.").format(key).postln;
+		} {
+			e = (bus: b, rbus: rb, wv: writerV.asInteger.clip(1, 16),
+				alloc: s.audioBusAllocator);
+			dict[key] = e;
+		};
 	} {
 		e[\wv] = writerV.asInteger.clip(1, 16);
+		// §port-nil the W bus is retried here too. Only `rbus` ever was, so an
+		// entry that had lost its W stayed broken for the session.
+		if (e[\bus].isNil) { e[\bus] = Bus.audio(s, 32) };
 		if (e[\rbus].isNil) { e[\rbus] = Bus.audio(s, 32) };
+		if (e[\bus].isNil or: { e[\rbus].isNil }) {
+			// The half-entry STAYS, and so does whichever bus it still holds:
+			// a live W bus has voices writing it, and handing that index back to
+			// the allocator under them is the §deck-retire fault in another
+			// place. Refuse for now; the next deploy retries both halves and the
+			// port comes back whole the moment the pool does.
+			e = nil;
+			("✗ f2: cannot re-allocate the port bus (32 ch) for % — the server's audio bus pool is exhausted; raise s.options.numAudioBusChannels and reboot the server. The port is bypassed.").format(key).postln;
+		};
 	};
-	// §port-sum the commit node is recreated ON EVERY DEPLOY, unconditionally: if the node
-	// died (a server reboot, CmdPeriod, someone else's freeAll) R would freeze forever —
-	// readers silent or holding the last block, and the only «fix» was a reboot. A deploy now
-	// always restores the path. Two nodes per port is cheap.
-	e[\commit] !? { |c| try { c.free } };
-	e[\commit] = nil;
-	if (topEnvironment[\f2PortSum] == false) {
-		// the switch: readers go back to W (the old behaviour). Otherwise the previous R bus
-		// lost its last reference right here — 32 channels per toggle.
-		e[\rbus] !? { |b| if (b !== e[\bus]) { try { b.free } } };
-		e[\rbus] = e[\bus];
-	} {
-		if (e[\rbus] === e[\bus]) { e[\rbus] = Bus.audio(s, 32) };   // back from switched-off
-		e[\commit] = Synth(\f2portCommit,
-			[\w, e[\bus].index, \r, e[\rbus].index],
-			topEnvironment[\f2PortCommitG].value, \addToTail);
-		e[\commit].register(true);
-	};
-	("[f2 port] % w=% r=% wv=% commit=%".format(key, e[\bus].index,
-		e[\rbus].index, e[\wv], e[\commit].notNil)).postln;
-	e
+	if (e.isNil) { nil } {
+		// §port-life the stamp the sweep reads: this name was named by THIS deploy,
+		// and this deploy named at least one port (so the sweep may run at all).
+		e[\seen] = topEnvironment[\f2PortEpoch] ? 0;
+		topEnvironment[\f2PortTouched] = true;
+		// §port-sum the commit node is recreated ON EVERY DEPLOY, unconditionally: if the node
+		// died (a server reboot, CmdPeriod, someone else's freeAll) R would freeze forever —
+		// readers silent or holding the last block, and the only «fix» was a reboot. A deploy now
+		// always restores the path. Two nodes per port is cheap.
+		e[\commit] !? { |c| try { c.free } };
+		e[\commit] = nil;
+		if (topEnvironment[\f2PortSum] == false) {
+			// the switch: readers go back to W (the old behaviour). Otherwise the previous R bus
+			// lost its last reference right here — 32 channels per toggle.
+			e[\rbus] !? { |b| if (b !== e[\bus]) { try { b.free } } };
+			e[\rbus] = e[\bus];
+		} {
+			// §port-nil back from switched-off, and the re-allocation can fail too:
+			// keep R on W rather than on nil, which is the old behaviour and not
+			// silence (the same fallback ~f2PortInSlot takes).
+			if (e[\rbus] === e[\bus]) { e[\rbus] = Bus.audio(s, 32) ? e[\bus] };
+			e[\commit] = Synth(\f2portCommit,
+				[\w, e[\bus].index, \r, e[\rbus].index],
+				topEnvironment[\f2PortCommitG].value, \addToTail);
+			e[\commit].register(true);
+		};
+		("[f2 port] % w=% r=% wv=% commit=%".format(key, e[\bus].index,
+			e[\rbus].index, e[\wv], e[\commit].notNil)).postln;
+		e
+	}
 };
 
 // a reader that spawns before the writer's deploy preamble: the port is ensured with
@@ -190,9 +411,15 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 };
 
 // the WRITER's slot: voice k → stereo pair k % 16 (the W bus)
+// §port-nil NIL when the port has no bus (the allocator refused it above). These
+// two are called from inside a voice spawn, so `.index` of nil killed the note
+// as well as the deploy; the callers in f2dsl read a nil slot as «no port on
+// this input/output» and keep the direct out.
 ~f2PortOutSlot = { |name, vi = 0|
 	var e = topEnvironment[\f2PortAt].value(name);
-	e[\bus].index + (2 * (vi.asInteger % 16))
+	if (e.notNil and: { e[\bus].notNil }) {
+		e[\bus].index + (2 * (vi.asInteger % 16))
+	} { nil }
 };
 
 // the READER's slot: voice k → stereo pair k % wv on the R BUS (§port-sum: the previous
@@ -200,7 +427,10 @@ SynthDef(\f2portCommit, { |w = 0, r = 0|
 // old boot without commit (degrade to the previous behaviour, not to silence).
 ~f2PortInSlot = { |name, vi = 0|
 	var e = topEnvironment[\f2PortAt].value(name);
-	((e[\rbus] ? e[\bus]).index) + (2 * (vi.asInteger % ((e[\wv] ? 16).max(1))))
+	var b = e !? { e[\rbus] ? e[\bus] };
+	if (b.notNil) {
+		b.index + (2 * (vi.asInteger % ((e[\wv] ? 16).max(1))))
+	} { nil }
 };
 
 // §loop-cond THE LOOP CONDITIONER on a port input: gain → OnePole(damp) → tanh saturation
@@ -386,17 +616,25 @@ SynthDef(\f2chainOut, { |in = 0, out = 0, amp = 1, gate = 1, t_trig = 0, freq = 
 // default `env` all three do, so `(v1: 4, v2: 1, env: adsr)` and `(v1: 4, v2: 1)`
 // are ONE def on every unit (§4.7). `filt: poly` spelled out is deliberately
 // NOT dropped — the store drops a default opt, and that rule is tested as is.
-~f2UnitVariantName = { |unit, opts|
-	var san = { |x| x.asString.collect { |ch| if (ch.isAlphaNum or: { ch == $_ }) { ch } { $_ } } };
+// The keys that reach the name, sorted, after the three exclusions above. Split
+// out of ~f2UnitVariantName so the collision tripwire below can ask the SAME
+// question — which opts does this name actually depend on — without repeating
+// the filter and drifting from it.
+~f2UnitVariantKeys = { |unit, opts|
 	var o = opts ? ();
 	var res = ((topEnvironment[\f2UnitOptsRes] ? IdentityDictionary.new)[unit.asSymbol] ? #[]);
 	var envV = ((o[\env] ? o["env"]) ? '').asSymbol;
 	var envDef = ((((topEnvironment[\f2UnitOpts] ? ())[unit.asSymbol] ? ())[\env] ? ())[\def] ? '').asSymbol;
 	var shot = envV == 'shot';
 	var envIsDef = (envV == envDef) or: { envV == 'gated' and: { envDef == 'ahdsr' } };
-	var keys = o.keys.asArray.collect(_.asString).sort.reject { |k|
+	o.keys.asArray.collect(_.asString).sort.reject { |k|
 		res.includesEqual(k.asSymbol) or: { shot and: { k == "freeze" } } or: { envIsDef and: { k == "env" } }
-	};
+	}
+};
+~f2UnitVariantName = { |unit, opts|
+	var san = { |x| x.asString.collect { |ch| if (ch.isAlphaNum or: { ch == $_ }) { ch } { $_ } } };
+	var o = opts ? ();
+	var keys = topEnvironment[\f2UnitVariantKeys].value(unit, opts);
 	if (keys.isEmpty) { unit.asSymbol } {
 		(unit.asString ++ "__" ++ keys.collect { |k|
 			san.(k) ++ "_" ++ san.((o[k.asSymbol] ? o[k]) ? "")
@@ -495,6 +733,31 @@ SynthDef(\f2chainOut, { |in = 0, out = 0, amp = 1, gate = 1, t_trig = 0, freq = 
 		};
 	}
 };
+// §name-collide THE NAME IS THE BUILD-CACHE KEY, AND IT IS NOT INJECTIVE. The
+// name is «unit __ sorted k_v joined by __» with every character outside
+// [A-Za-z0-9_] replaced by _, so two different opt sets can spell one name: a
+// value carrying the joiner ((a: 1, b: 2) and (a: '1__b_2') both give
+// fooU__a_1__b_2), and a value whose sanitisation is another's literal spelling
+// ('a.b' and 'a b' and 'a_b' all give fooU__filt_a_b). Whichever set is built
+// first then answers every later spawn of the other, silently: the card shows
+// the user's pick and the voice sounds like the other setting. NOT REACHABLE
+// TODAY — every shipped GRAPH opt enumerates bare alnum tokens, and the one
+// family that does not (samplerU.beatLen, '1/1'…'1/16d') is a resource opt and
+// never enters the name. So this does not re-encode the name: renaming every
+// variant would move every save's fingerprint and every expectation in
+// build.scd to close a hole nobody can reach. It watches instead, on the DEPLOY
+// path only — once per card per deploy, nothing on the note path — and says so
+// the first time a name is asked for with opts that are not the ones it was
+// built from. Only the keys that REACH the name are compared: a resource opt
+// (a different sample on the same variant) is a legitimate difference.
+// sc/nrt/variant-name.scd holds the tripwire that fires when the schema itself
+// gains a graph opt whose values are not bare alnum.
+~f2UnitOptSig = { |unit, opts|
+	var o = opts ? ();
+	topEnvironment[\f2UnitVariantKeys].value(unit, o).collect { |k|
+		k ++ "=" ++ ((o[k.asSymbol] ? o[k]) ? "").asString
+	}.join(",")
+};
 // Deploy-preamble entry (compiled code, before ~play):
 //   ~f2UnitEnsure.(\samplerU, (env: 'shot', sample: 'kick'));
 // Runs inside a Routine: the variant is built, added and the server's ack
@@ -515,6 +778,20 @@ SynthDef(\f2chainOut, { |in = 0, out = 0, amp = 1, gate = 1, t_trig = 0, freq = 
 	if (gone) {
 		topEnvironment[\f2UnitGone].value(unit, preset ? "a preset", nil);
 	} {
+		if (opts.notNil and: { opts.size > 0 }) {
+			var seen = topEnvironment[\f2UnitOptSeen];
+			var vnm = topEnvironment[\f2UnitVariantName].value(unit, opts);
+			var sig = topEnvironment[\f2UnitOptSig].value(unit, opts);
+			if (seen.isNil) { seen = IdentityDictionary.new; topEnvironment[\f2UnitOptSeen] = seen };
+			if (vnm != unit.asSymbol) {
+				if (seen[vnm].isNil) { seen[vnm] = sig } {
+					if (seen[vnm] != sig) {
+						topEnvironment[\f2UnitWarnOnce].value(("collide_" ++ vnm).asSymbol,
+							"⚠ [f2 unit] the variant name % is not unique: it was built from (%) and is now asked for with (%) — the FIRST build is what sounds".format(vnm, seen[vnm], sig));
+					};
+				};
+			};
+		};
 		name = topEnvironment[\f2UnitDef].value(unit, opts);
 		if (thisThread.isKindOf(Routine) and: { built.notNil } and: { opts.notNil } and: { opts.size > 0 }) {
 			vn = topEnvironment[\f2UnitVariantName].value(unit, opts);
@@ -1013,7 +1290,7 @@ if (~f2SmpPV.not) {
 	var f = topEnvironment[\f2SmpFftOf].(qual);
 	SynthDef(("f2SmpFftRec_" ++ qual).asSymbol, { |buf = 0, fftBuf = 1|
 		var in = PlayBuf.ar(1, buf, BufRateScale.kr(buf), 1, 0, 0, 2);
-		PV_RecordBuf(FFT(LocalBuf(f[\nfft], 1), in, f[\hop], f[\wintype]),
+		topEnvironment[\f2PvRecordBuf].(FFT(LocalBuf(f[\nfft], 1), in, f[\hop], f[\wintype]),
 			fftBuf, 0, 1, 0, f[\hop], f[\wintype]);
 		Out.ar(0, DC.ar(0));
 	})
@@ -1037,7 +1314,7 @@ if (~f2SmpPV.not) {
 	var f = topEnvironment[\f2SmpFftOf].(qual);
 	SynthDef(("f2SmpFftNull_" ++ qual).asSymbol, { |fftBuf = 1|
 		Line.kr(1, 1, (f[\nfft] * 4) / SampleRate.ir, doneAction: 2);
-		PV_RecordBuf(FFT(LocalBuf(f[\nfft], 1), DC.ar(0), f[\hop], f[\wintype]),
+		topEnvironment[\f2PvRecordBuf].(FFT(LocalBuf(f[\nfft], 1), DC.ar(0), f[\hop], f[\wintype]),
 			fftBuf, 0, 1, 0, f[\hop], f[\wintype]);
 		Out.ar(0, DC.ar(0));
 	})
@@ -2844,6 +3121,18 @@ SynthDef(\scatU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	polymerU:   [\ld] ++ ~f2FltModels.reject { |m| m == \ld },
 	samplerU:   ~f2FltModels.copy
 );
+// §sc-deps four of the eleven arms play `SVF`, which is not in the core class
+// library (see the capability block at the top of this file). Without it those
+// models have no arm, and a model with no arm is exactly what ~f2FltResolve
+// already handles: the card is told ONCE and the unit's own default plays. So
+// the capability is spent here, on the one table every reader consults, rather
+// than in four arms and three menus. With sc3-plugins installed this line
+// changes nothing — the reject is empty and each list is its own copy.
+if (~f2ExtHas.(\svf).not) {
+	var lost = ~f2ExtFltModels[\svf];
+	~f2FltBuilt.keysValuesDo { |u, list| ~f2FltBuilt[u] = list.reject { |m| lost.includes(m) } };
+	("⚠ [f2 deps] filter models % need SVF (sc3-plugins) and are NOT built — a save asking for one plays the unit's default model".format(lost)).postln;
+};
 // The CORE of the block (FILTER.md §5.2): what a unit that joins it must declare
 // — the model, the switch, the bus knobs and the per-model cells. The synths
 // declare ~f2FltSpecs whole; the sampler declares this subset, because Bitwig's
@@ -3393,13 +3682,13 @@ SynthDef(\scatU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	var kneeAt = 2;
 	var x      = pre.clip2(kneeAt) + ((pre.abs - kneeAt).max(0).tanh * pre.sign);
 	// the non-resonant pre-block (Q 0.5) and its one-poles
-	var pc     = SVF.ar(x, cutA, 0, isLP, preBP, preHP);
+	var pc     = topEnvironment[\f2Svf].(x, cutA, 0, isLP, preBP, preHP);
 	var pc1    = FOS.ar(pc, preA0, preA1, b1);
 	var pc2    = FOS.ar(pc1, preA0, preA1, b1);
 	var cellIn = Select.ar(src, [x, pc, pc1, pc2]);
 	// the resonant cell, and the same tap at res 0 for the resonant component
-	var cellR  = SVF.ar(cellIn, cutA, r, 1 - isHP, cellBP, isHP);
-	var cell0  = SVF.ar(cellIn, cutA, 0, 1 - isHP, cellBP, isHP);
+	var cellR  = topEnvironment[\f2Svf].(cellIn, cutA, r, 1 - isHP, cellBP, isHP);
+	var cell0  = topEnvironment[\f2Svf].(cellIn, cutA, 0, 1 - isHP, cellBP, isHP);
 	var rsn    = cellR - cell0;
 	var sym    = (rsn / lim).tanh * lim;
 	var asym   = LeakDC.ar((((rsn / lim) + 0.3).tanh - 0.3.tanh) * lim, 0.999);
@@ -3435,7 +3724,7 @@ SynthDef(\scatU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	var lv  = [Select.kr(m, #[1, 0, 0, 0]), Select.kr(m, #[0, 1, 0, 0]), Select.kr(m, #[0, 0, 1, 0]), Select.kr(m, #[0, 0, 0, 1])];
 	var kneeAt = 2;
 	var x   = pre.clip2(kneeAt) + ((pre.abs - kneeAt).max(0).tanh * pre.sign);
-	var y   = SVF.ar(x, cutA, rr, lv[0], lv[1], lv[2], lv[3], 0);
+	var y   = topEnvironment[\f2Svf].(x, cutA, rr, lv[0], lv[1], lv[2], lv[3], 0);
 	var lim = resLimit.clip(0.05, 1) * 2;
 	(y / lim).tanh * lim
 };
@@ -3745,7 +4034,7 @@ SynthDef(\scatU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	var nest = v, sat, y;
 	4.do { |i| nest = BPeakEQ.ar(nest, fN[i], rqN, gN[i]) };
 	sat = (nest * g).tanh / g;                       // the feedback-path saturation; resLimit = its ceiling
-	y   = SVF.ar(sat, cutA, (k.abs * 0.9).clip(0, 0.98), 1, 0, 0, 0, 0);   // the outer resonant LP: its resonance IS |Feedback Gain|
+	y   = topEnvironment[\f2Svf].(sat, cutA, (k.abs * 0.9).clip(0, 0.98), 1, 0, 0, 0, 0);   // the outer resonant LP: its resonance IS |Feedback Gain|
 	LeakDC.ar(y, 0.9993)
 };
 
@@ -3956,8 +4245,8 @@ SynthDef(\scatU, { |out = 0, gate = 0, t_trig = 0, amp = 1, i_free = 2, tel_bus 
 	var nfb   = Select.ar(fire, [nWind, nFire]);
 	var gR    = gK.clip(-0.9, 0.9);
 	var u     = x + (gR * nfb);
-	var y     = SVF.ar(u, cutA, 0.00737, 1, 0, 0, 0, 0);
-	var pTap  = SVF.ar(u, cutA, 0.00737, 1 - twFB, twFB * 1.4142135623730951, 0, 0, 0);
+	var y     = topEnvironment[\f2Svf].(u, cutA, 0.00737, 1, 0, 0, 0, 0);
+	var pTap  = topEnvironment[\f2Svf].(u, cutA, 0.00737, 1 - twFB, twFB * 1.4142135623730951, 0, 0, 0);
 	var r3    = y + (kff * nfb);
 	BufWr.ar((pTap / lim).tanh * lim, mem, ph, 1);
 	Select.ar(nat, [earthO, r3, r3])
@@ -5404,7 +5693,7 @@ if (s.serverRunning) {
 	// ── the vocoder. ONE read: the frame the head stands on, resynthesised at
 	// the synthesis hop. No transposition anywhere in it — that is the whole of
 	// decision 2, and it is by construction rather than by cancellation.
-	var ch0   = PV_BufRd(LocalBuf(nfft, 1), aBuf, (ptF + dith).clip(0, ptMax));
+	var ch0   = topEnvironment[\f2PvBufRd].(LocalBuf(nfft, 1), aBuf, (ptF + dith).clip(0, ptMax));
 
 	// ── Phase Dispersion (§1.7, default 66.7 %). Frames that were not recorded
 	// a hop apart do not overlap-add with the phase they were analysed with, and
@@ -5421,7 +5710,7 @@ if (s.serverRunning) {
 	// impulse train at the frame rate is sampled at the frame boundary and
 	// missed outright (measured: the output was identical to no diffuser at
 	// all) — so the trigger is a constant and the amount is the crossfade.
-	var chD   = PV_XFade(ch0, PV_Diffuser(PV_Copy(ch0, LocalBuf(nfft, 1)), 1), dAmt);
+	var chD   = topEnvironment[\f2PvXFade].(ch0, PV_Diffuser(PV_Copy(ch0, LocalBuf(nfft, 1)), 1), dAmt);
 	// PV_XFade is a LINEAR mix and the two chains are uncorrelated by
 	// construction, so half of each is half the power: measured 3.2 dB down at
 	// the middle of the travel, which would make [RN]'s 66.7 % default the
@@ -5462,7 +5751,7 @@ if (s.serverRunning) {
 	// exactly linear with exact endpoints (measured), so Amount 0 — and the
 	// formant switch OFF — is the chain that came in, bin for bin, and not a
 	// round trip that happens to land close.
-	var chF   = PV_XFade(chD, wet, fAmt);
+	var chF   = topEnvironment[\f2PvXFade].(chD, wet, fAmt);
 
 	// ── REHARM (§1.7 `spChar`): Harmonic Bend and the quantization of it. [RN]:
 	// the bend «shifts the harmonics and leaves the fundamental in place». A bin
@@ -5514,7 +5803,7 @@ if (s.serverRunning) {
 	// and the choice is made in the SPECTRUM: a Select between two IFFTs would
 	// build the most expensive UGen in the mode twice and run both. PV_XFade at
 	// fade 0 is its first buffer exactly (measured), which is `chF`.
-	var chX   = PV_XFade(chF, chB, spC);
+	var chX   = topEnvironment[\f2PvXFade].(chF, chB, spC);
 	var sig   = IFFT(chX, wtype) * gain * dComp;
 	// §5 what the card draws around a spectral head: the analysis window, in the
 	// same 0…1 of the file the head is in

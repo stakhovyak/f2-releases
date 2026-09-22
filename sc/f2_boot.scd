@@ -24,6 +24,42 @@ s.options.numBuffers = 4096;
 // the pool dry is silent — Bus.audio simply returns nil and the next `.index`
 // kills the voice event. 16384 channels cost about four megabytes.
 s.options.numAudioBusChannels = 16384;
+// §bus-ceil Headroom for the CONTROL-bus allocator, which is the one that scales with the
+// SIZE OF THE MUSIC and was the only pool here nobody had ever set. Every live parameter of
+// every SOUNDING CELL owns one control bus for the life of the session (they are never freed
+// — see the §fix note in the /f2/hush handler), so the count is cells x live params, and it
+// runs away quietly: measured on a real save, ONE 16x5 block of a polymer preset costs 4648
+// buses and a second block of the same size takes it to 9960. scsynth's default is 16384, so
+// that save was one block short of a row that cannot be deployed at all — and what the user
+// saw at the wall was 3966 identical allocator errors, one «'asMap' not understood», and an
+// edit that appeared to do nothing (the Pdef swap never happened, so the OLD structure went
+// on playing).
+//
+// §bus-ceil2 65536 was still too small for a real session. At 4648 buses per 16x5 block, a
+// musician running 16-24 rows at once needs 74368-111552 buses for ONE deploy pass — 65536
+// cannot hold a single pass. Raised to a million, which holds 9-13 passes.
+//
+// WHAT 1000000 COSTS, all measured against 65536 under this exact option block: scsynth boot
+// time identical (0.164 s), scsynth RSS +7.1 MiB (7.96 B/channel), sclang +15.5 MiB for the
+// allocator array, s.newBusAllocators below +5.5 ms — once, at boot, and this is its only
+// call site in the app. Allocation latency is unchanged at equal occupancy; the shared-memory
+// reads Bus:getSynchronous does for the harmony latch are correct at the very top of the range
+// (index 999999 read back exactly what /c_get returned); five boot/quit cycles create and
+// remove the segment cleanly; and the engine's own OUT OF MODULATION BUSES diagnostic in
+// f2_modsmooth.scd still fires the same way when the pool is finally spent.
+//
+// THE WALL BELOW IS NOT A STYLE CHOICE. The control buses live in a shared-memory segment of
+// a size hard-coded in SuperCollider (common/server_shm.hpp: `8192 * 1024`), and 128 scope
+// buffers take exactly 4 MiB of it before the first bus is allocated, leaving 4 bytes per
+// channel in what remains. Measured on 3.13.0: -c 1044970 boots, -c 1044971 dies with
+// «Exception in World_New: boost::interprocess::bad_alloc» and SIGSEGV BEFORE THE SERVER
+// BINDS ITS PORT. sclang's doWhenBooted has no timeout in 3.13.0, so nothing below this line
+// would ever run and the app would sit on a disabled button reading «ready» (see §boot-guard
+// in src-tauri/src/sc/process.rs, which is what now makes that visible). Anyone raising this
+// number for headroom gets that, silently — hence the clamp, which is a separate statement so
+// the literal above stays readable to sc/nrt/live-modbus.scd §A.
+s.options.numControlBusChannels = 1000000;
+s.options.numControlBusChannels = s.options.numControlBusChannels.min(1044970);
 s.newBusAllocators;
 s.waitForBoot({
     var dsl = res.("f2dsl.scd");

@@ -23,6 +23,14 @@ stereo input that presets are routed into, whose content is a **pipeline** of no
 **Buses** — bus cards with their pipelines. `+ IN bus` adds one; removal is available while
 more than one remains.
 
+A bus **name is a key on the server**, not a label: the rack registers `~rack.bus[<name>]`
+under the name with every character outside `A-Z a-z 0-9 _` replaced by `_`. So the rename
+field commits the same form — type `Drum Bus` and the card reads `Drum_Bus`, which is what
+the engine has. Two buses can never collapse onto one key: a name already taken by another
+bus, or by the fixed `main` / `tel`, gets a `_2`, `_3` … suffix. Projects saved before this
+still route: both compilers pass a bus name through the same rule on its way into the
+program, so an older `low-mid` asks the engine for `\low_mid`, the key the rack really made.
+
 ---
 
 ## 2. Pipeline nodes
@@ -32,7 +40,12 @@ more than one remains.
 delete.
 
 **`merge`** — mixes another bus's output into this point of the pipeline. This is the building
-block of send topologies: a send bus runs its own chain and merges into the common one.
+block of send topologies: a send bus runs its own chain and merges into the common one. A
+merge holds a *reference* to its source bus, and the reference is re-pointed when the rack is
+loaded from `f2_rack_config.json`, so a saved merge still taps the bus it was drawn on. If the
+source bus is gone — deleted after the merge was placed, or missing from a hand-edited config
+— the tap cannot be generated: the load log says so and the deployed program prints
+`⚠ RACK: merge: source bus is gone`, rather than the path quietly leaving the mix.
 
 **`split`** — branches into lanes (`a`, `b`, …), each with its own sub-pipeline; the lane
 outputs are summed at the node's output. Two modes:

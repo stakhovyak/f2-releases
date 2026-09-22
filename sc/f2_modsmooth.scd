@@ -11,7 +11,48 @@ SynthDef(\f2_msmooth, { |raw=0, out=0, lag=0.016|
 ~mbSm  = ~mbSm  ?? { IdentityDictionary.new };    
 ~mbSyn = ~mbSyn ?? { IdentityDictionary.new };    
 
-~mbRawAt = { |k| var b = ~mbRaw[k]; if (b.isNil) { b = Bus.control(s, 1); ~mbRaw.put(k, b) }; b };
+// §bus-ceil THE MODULATION BUS POOL HAS A FLOOR, AND RUNNING IT DRY WAS SILENT.
+//
+// One control bus per (SOUNDING CELL x LIVE PARAM of its preset), for the life of the SC
+// session — they are deliberately never freed (see the §fix note in the /f2/hush handler:
+// patterns of rows that were not redeployed hold .asMap on specific indices). So the pool
+// is spent by the SIZE OF THE MUSIC, and it grows fast: measured on a real save, ONE 16x5
+// block of a polymer preset (56 sounding cells x 83 live params) asks for 4648 buses, and
+// a second block of the same size takes it to 9960.
+//
+// What happened when it ran out, measured with the pool set to 6000 and that second block
+// added: 3966 lines of «ERROR: Meta_Bus:control: failed to get a control bus allocated»,
+// then ONE «ERROR: Message 'asMap' not understood» — the deploy program threw at the first
+// event whose bus is nil and everything after that line never ran. No Pdef swap, so the row
+// went on playing the PREVIOUS structure while the app showed the new one: the edit looked
+// like it had done nothing, and the one line that named the cause was buried under four
+// thousand that did not.
+//
+// Now: the first refusal SAYS what ran out, how much this session already holds and what to
+// change, and no further allocation is attempted until the next deploy re-arms it — a pool
+// that is dry halfway through a program will not fill up before the end of it, and the wall
+// of identical errors is what hid the diagnosis. ~f2ModBusRearm is called by the eval drain
+// at the top of every program (f2_remote_eval.scd).
+~mbDry = ~mbDry ? false;
+~f2ModBusRearm = { ~mbDry = false };
+~mbRawAt = { |k|
+	var b = ~mbRaw[k];
+	if (b.isNil and: { ~mbDry.not }) {
+		b = Bus.control(s, 1);
+		if (b.isNil) {
+			~mbDry = true;
+			("✗ f2: OUT OF MODULATION BUSES — this session holds % of them and the server's pool"
+				" (s.options.numControlBusChannels = %) is spent. Every sounding cell takes one bus"
+				" per live parameter of its preset, so a row of this size cannot be deployed: it will"
+				" go on playing the PREVIOUS structure. Raise s.options.numControlBusChannels in"
+				" sc/f2_boot.scd and reboot the server, or make the row smaller (fewer cells, a preset"
+				" with fewer live parameters).").format(~mbRaw.size, s.options.numControlBusChannels).postln;
+		} {
+			~mbRaw.put(k, b);
+		};
+	};
+	b
+};
 ~mbAt = { |k| ~mbSm[k] ? ~mbRawAt.(k) };
 OSCdef(\f2_setb, { |msg|
     topEnvironment.use { var i = 1, n = msg.size;

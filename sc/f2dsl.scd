@@ -685,12 +685,17 @@
 	~f2VGroups = nil;   // §loop-order v2 migration: the old dictionary with its poisoned parent ivar goes
 	// §reuse freeing a ROW's voices (a stop or a row switched off, AND the beginning of every
 	//   deploy — see the compiler). Otherwise persistent i_free=0 voices hang about: legato and
-	//   hold keep the gate up so the sound never dies; and after a /f2/hush ~f2PatGroup.freeAll
-	//   kills the voices SILENTLY (/g_freeAll sends no /n_end) — isPlaying stays true, and the
-	//   next deploy maps DEAD nodes → a flood of «/n_mapn Node not found». So they leave the
-	//   dictionary at once, and set/free are sent with the error SUPPRESSED (the node may already
-	//   have been killed by freeAll — «not found» must not spam). Gate off → .free after the tail
-	//   (a soft release, if the node is still alive).
+	//   hold keep the gate up so the sound never dies. So they leave the dictionary at once, and
+	//   set/free are sent with the error SUPPRESSED (a /f2/hush's ~f2PatGroup freeAll may already
+	//   have taken them — «not found» must not spam). Gate off → .free after the tail (a soft
+	//   release, if the node is still alive).
+	//   CORRECTION, measured on 3.13.0: /g_freeAll does NOT kill silently. Freeing a group sends
+	//   /n_end for every node under it — children, grandchildren and the groups among them — so a
+	//   registered voice taken by a hush really does drop to isPlaying false, and the registries
+	//   below are emptied for the sake of the pool's bookkeeping, not to work around a missing
+	//   notification. The «/n_mapn Node not found» flood this note used to blame on that comes
+	//   from the opposite case and is fixed at its own root — see §node-live just below: a node
+	//   the server REFUSED never sends /n_go or /n_end at all.
 	// §stack voice accessors. A pooled voice is either a plain Synth or a STACK
 	// PROXY — an Event (grp: Group, nodes: id → Synth, out: output id) built by
 	// mkVoice for a composite preset. §cards strips build the same proxy plus
@@ -713,22 +718,58 @@
 	// set by \f2voice itself, and the demux drops them here. Bodies avoid
 	// bare ~ (called from Event:play — see the note in f2units.scd).
 	~f2VNode = { |v| if (v.isKindOf(Event)) { v[\grp].nodeID } { v.tryPerform(\nodeID) } };
+	// §node-live A NODE THE SERVER REFUSED IS A CORPSE THAT NEVER LIVED, and
+	// isPlaying cannot see it. When /s_new or /g_new is refused — the parent
+	// group is gone, the server has not got that SynthDef, maxNodes is reached —
+	// the client still has its Node object, `register(true)` has already put
+	// isPlaying at TRUE, and no /n_go and no /n_end will ever arrive to take it
+	// down again. So isPlaying stays true for the rest of the session, every
+	// liveness guard below used to believe it, the pool never replaced that
+	// voice, and every event went on addressing it. Measured on 3.13.0: one
+	// «/n_mapn Node N not found» per mapped parameter per event — 23 of them per
+	// event on the golden program, the same node id over and over, for as long
+	// as the row plays, with the voice silent throughout.
+	//
+	// NodeWatcher sets isRunning only on a real /n_go, and register(true) does
+	// NOT touch it (measured: a live node reads isPlaying true / isRunning true,
+	// a refused one isPlaying true / isRunning false, and stays that way). So
+	// isRunning is the SERVER's own confirmation, and this is the test every
+	// guard uses: playing AND (confirmed, or still too young to have answered).
+	// `at` is when the client sent the spawn (Main.elapsedTime); without one,
+	// only a confirmation counts — which is right for a node old enough to be
+	// asked about, and is why the stamp is kept next to every node the engine
+	// may address within a moment of making it. Nothing here pauses nodes
+	// (/n_run is never sent), so isRunning false on a confirmed node cannot
+	// happen; if that ever changes this test needs a third state. The grace is a
+	// SECOND, which is three orders of magnitude over a local server's round trip
+	// and still short enough that a refused voice is replaced on the next event;
+	// it is settable from the shell (`~f2NodeGrace = 2;`) for a server that is not
+	// on this machine, and preserved across a reload of this file.
+	~f2NodeGrace = ~f2NodeGrace ? 1.0;
+	~f2NodeLive = { |n, at|
+		n.notNil and: { n.isPlaying and: { n.isRunning
+			or: { at.notNil and: { (Main.elapsedTime - at) < (topEnvironment[\f2NodeGrace] ? 1.0) } } } }
+	};
 	// §cards liveness: user SynthDefs from Synths/ use doneAction: 2 and have no
 	// i_free — as a card such a node self-frees after its first release while
 	// the voice group stays "playing"; judged by the group alone the pool never
 	// respawned the slot and it stayed silent forever. Every card node (and the
 	// sink) is registered at spawn, so a dead child marks the voice dead and
 	// the pool respawns it (freeing the group first — nothing leaks).
-	~f2VPlaying = { |v|
+	// §node-live `at` is the voice's spawn stamp (pool[\bornAt][idx]): inside the
+	// grace an unconfirmed node counts as alive, because \f2voice maps a voice
+	// in the same event that spawned it and the confirmation is still in flight.
+	~f2VPlaying = { |v, at|
+		var live = topEnvironment[\f2NodeLive];
 		// §stack a group of copies is alive when its group and every copy are
 		if (v.isKindOf(Event) and: { v[\copies].notNil }) {
-			v[\grp].isPlaying and: { v[\copies].every { |c| topEnvironment[\f2VPlaying].value(c) } }
+			live.(v[\grp], at) and: { v[\copies].every { |c| topEnvironment[\f2VPlaying].value(c, at) } }
 		} {
 		if (v.isKindOf(Event)) {
-			v[\grp].isPlaying
-				and: { v[\nodes].values.every { |n| n.isPlaying } }
-				and: { v[\sink].isNil or: { v[\sink].isPlaying } }
-		} { v.isPlaying }
+			live.(v[\grp], at)
+				and: { v[\nodes].values.every { |n| live.(n, at) } }
+				and: { v[\sink].isNil or: { live.(v[\sink], at) } }
+		} { live.(v, at) }
 		}
 	};
 	~f2VDemux = { |v, args|   // flat [k, val …] → (shared: [...], per: id → [...], sink: [...])
@@ -767,20 +808,41 @@
 		};
 		(shared: shared, per: per, sink: sink)
 	};
+	// §node-live THE PER-EVENT SET AND REMAP ARE BEST EFFORT, AND NOW SAY SO.
+	// Every other send in this file that may reach a node that has just gone —
+	// the gate-off, the soft retire, ~f2FreeSceneVoices, ~f2FreePost — already
+	// goes out inside [\error, 0] … [\error, 1], because a node can die between
+	// the decision and the packet for perfectly ordinary reasons (a doneAction:2
+	// card self-freed, a hush took the group) and «Node not found» must not spam.
+	// These two were the exception, and they are the two that run PER EVENT and
+	// once PER PARAMETER: with the golden program's 23 mapped parameters that is
+	// 23 lines an event, several times a second, for one voice the server never
+	// made. The liveness fix above is what RECOVERS such a voice (it is replaced
+	// on the next event); this is what keeps the window before the replacement,
+	// and any genuinely transient death, down to nothing. The one thing worth
+	// saying is said once, by name, where the voice is replaced.
+	~f2SetQuiet = { |n, args|
+		n !? { s.sendBundle(nil, [\error, 0], n.setMsg(*args), [\error, 1]) };
+	};
+	~f2MapQuiet = { |n, args|
+		n !? { s.sendBundle(nil, [\error, 0], n.mapMsg(*args), [\error, 1]) };
+	};
 	~f2VSet = { |v, args|
+		var quiet = topEnvironment[\f2SetQuiet];
 		// §stack every copy takes the set (gate, freq, t_trig, plain params alike)
 		if (v.isKindOf(Event) and: { v[\copies].notNil }) {
 			v[\copies].do { |c| topEnvironment[\f2VSet].value(c, args) };
 		} {
 		if (v.isKindOf(Event)) {
 			var d = topEnvironment[\f2VDemux].value(v, args);
-			if (d[\shared].size > 0) { v[\grp].set(*d[\shared]) };
-			d[\per].keysValuesDo { |id, a| v[\nodes][id] !? { |n| n.set(*a) } };
-			if (d[\sink].size > 0) { v[\sink] !? { |n| n.set(*d[\sink]) } };
-		} { v.set(*args) };
+			if (d[\shared].size > 0) { quiet.(v[\grp], d[\shared]) };
+			d[\per].keysValuesDo { |id, a| quiet.(v[\nodes][id], a) };
+			if (d[\sink].size > 0) { quiet.(v[\sink], d[\sink]) };
+		} { quiet.(v, args) };
 		}
 	};
 	~f2VMap = { |v, param, idx|
+		var quiet = topEnvironment[\f2MapQuiet];   // §node-live see ~f2VSet above
 		// §stack one bus for every copy (the gate, a channel gate): per-copy buses
 		// go through the f2map loop of \f2voice, which addresses each copy itself
 		if (v.isKindOf(Event) and: { v[\copies].notNil }) {
@@ -788,11 +850,18 @@
 		} {
 		if (v.isKindOf(Event)) {
 			var d = topEnvironment[\f2VDemux].value(v, [param, idx]);
-			if (d[\shared].size > 0) { v[\grp].map(*d[\shared]) };
-			d[\per].keysValuesDo { |id, a| v[\nodes][id] !? { |n| n.map(*a) } };
-			if (d[\sink].size > 0) { v[\sink] !? { |n| n.map(*d[\sink]) } };
-		} { v.map(param, idx) };
+			if (d[\shared].size > 0) { quiet.(v[\grp], d[\shared]) };
+			d[\per].keysValuesDo { |id, a| quiet.(v[\nodes][id], a) };
+			if (d[\sink].size > 0) { quiet.(v[\sink], d[\sink]) };
+		} { quiet.(v, [param, idx]) };
 		}
+	};
+	// §node-live a voice the client believes in that the SERVER never confirmed:
+	// isPlaying true (register(true) put it there), isRunning still false past the
+	// grace — its /s_new or /g_new was refused and made no node at all.
+	~f2VRefused = { |v|
+		var n = if (v.isKindOf(Event)) { v[\grp] } { v };
+		n.notNil and: { n.isPlaying and: { n.isRunning.not } }
 	};
 	// §bus-gen freeing a stage-bus registry entry. An entry remembers the ALLOCATOR it took its
 	// bus from: after s.newBusAllocators (a server reboot with sclang still alive) the allocator is
@@ -822,23 +891,46 @@
 	// later retirement drains everything that has matured — one lost call costs nothing any more. The
 	// due time is on Main.elapsedTime, as everywhere else in this engine: the mark is set from a
 	// TempoClock routine and drained on SystemClock, and the clock must not matter here.
+	// §park-eps AND THAT LAST SENTENCE WAS THE MISTAKE: THE MARK AND THE WAKE COME
+	// OFF DIFFERENT CLOCKS. The due time is
+	// PHYSICAL (Main.elapsedTime, deliberately — see above), while
+	// SystemClock.sched places the wake at the CALLING THREAD'S LOGICAL seconds
+	// plus delay. Every real caller is inside a clock routine — ~f2DeckSync and
+	// ~f2FreeSceneVoices are interpreted inside the eval drain's
+	// Routine(…).play(TempoClock.default) — and a routine's logical seconds run
+	// BEHIND physical by the scheduler's wake latency, measured at 2e-4 s here.
+	// So the drain woke that much before its own entry was due, `due <= now` was
+	// false for it, and the last entry of every burst was stranded: 20 of 20, not
+	// the coin flip the shape suggests. And 2e-4 is the FLOOR: a real caller runs
+	// in the middle of `c.interpret` of a whole deploy program, which advances no
+	// logical time at all, so the lag is whatever that interpret costs — seconds,
+	// on a content boot. Hence both halves. The 0.01 tolerance settles the bare
+	// scheduler's lag in one wake; the re-schedule of whatever the drain KEPT is
+	// what covers an arbitrarily large one, and the lost wake the comment above
+	// worries about (CmdPeriod clears scheduled functions) with it. A drain is
+	// only re-armed while something is still parked, so the chain ends itself.
 	~f2StackBusRetire = { |e, delay = 0.5|
+		var drain;
 		if (e.notNil) {
 			e[\due] = Main.elapsedTime + delay;
 			topEnvironment[\f2StackBusParked] = (topEnvironment[\f2StackBusParked] ? []).add(e);
 		};
-		SystemClock.sched(delay, {
+		drain = {
 			var now = Main.elapsedTime, keep = [];
 			(topEnvironment[\f2StackBusParked] ? []).do { |o|
-				if ((o[\due] ? 0) <= now) {
+				if ((o[\due] ? 0) <= (now + 0.01)) {
 					topEnvironment[\f2StackBusRel].value(o);
 				} {
 					keep = keep.add(o);
 				};
 			};
 			topEnvironment[\f2StackBusParked] = keep;
+			if (keep.size > 0) {
+				SystemClock.sched((keep.collect { |o| o[\due] ? 0 }.minItem - now).max(0.01), drain);
+			};
 			nil
-		});
+		};
+		SystemClock.sched(delay, drain);
 	};
 	~f2StackBusGen = { |reg, poolKey|
 		var ps = poolKey.asString, at, pre;
@@ -896,7 +988,8 @@
 	~f2StaticMapAdd = { |key, node, param, grp|
 		var reg = topEnvironment[\f2StaticMaps];
 		if (reg.isNil) { reg = IdentityDictionary.new; topEnvironment[\f2StaticMaps] = reg };
-		reg[key] = (reg[key] ? []).add((node: node, param: param, grp: grp));
+		// §node-live `at` is the spawn stamp the liveness test needs (see ~f2NodeLive)
+		reg[key] = (reg[key] ? []).add((node: node, param: param, grp: grp, at: Main.elapsedTime));
 	};
 	~f2SmoothHook = { |k, sm|
 		var reg = topEnvironment[\f2StaticMaps];
@@ -904,7 +997,10 @@
 		var kept = [];
 		if (list.notNil and: { sm.notNil }) {
 			list.do { |e|
-				if (e[\node].isPlaying) {
+				// §node-live isPlaying alone kept a node the server had REFUSED here for
+				// the rest of the session, and the hook remapped it on every key it owns
+				// — one «/n_mapn Node N not found» per key, the same id
+				if (topEnvironment[\f2NodeLive].(e[\node], e[\at])) {
 					e[\node].map(e[\param], sm.index);
 					kept = kept.add(e);
 				};
@@ -1070,7 +1166,10 @@
 		var g = top[\f2DeckGroup];
 		var pg = top[\f2PatGroup];
 		var at = top[\f2DeckGroupAtT] ? 0;
-		if (g.isNil or: { g.isPlaying.not and: { (Main.elapsedTime - at) > 1 } }) {
+		// §node-live confirmed by the server, or young enough not to have answered
+		// yet (~f2NodeLive); isPlaying alone also believed a group whose /g_new was
+		// refused, and every deck built into it was silent for the session
+		if (g.isNil or: { topEnvironment[\f2NodeLive].(g, at).not }) {
 			if (pg.notNil) {
 				g = Group.after(pg);
 			} {
@@ -1268,9 +1367,26 @@
 		if (row.isNil) { row = IdentityDictionary.new; reg[rk] = row };
 		defs = defs ? [];
 		// (a) vanished decks
+		// §deck-retire THE GROUP MAY GO NOW, THE BUS MAY NOT. This used to call
+		// ~f2DeckFree with keepBus at its default false, which hands the index
+		// back to s.audioBusAllocator in the same instant — and the compiled
+		// program emits ~f2FreeSceneVoices one line BEFORE this sync
+		// (src/lib/compiler.ts), which only gates the row's voices and frees them
+		// 0.4 beats later. So a voice still writing this deck's IN pair is
+		// guaranteed, not likely. Measured: the very next Bus.audio of the same
+		// width was handed the vanished deck's index, and a synth left writing it
+		// metered 0.27 on a deck of an UNRELATED row — the one allocator serves
+		// every Bus.audio in the engine, so a stage bus or a rack bus can catch it
+		// just as easily. The rebuild in (b) and the row stop in ~f2FreeSceneDecks
+		// already park theirs for exactly this reason; this was the one path left.
 		row.keys.asArray.do { |sc|
 			if (defs.detect { |d| d[\scope].asSymbol == sc }.isNil) {
-				top[\f2DeckFree].value(row[sc]);
+				var e = row[sc];
+				// a bus from a previous server life is only forgotten, as everywhere
+				var oldBus = if (e.notNil and: { e[\alloc] === s.audioBusAllocator }) { e[\bus] };
+				top[\f2DeckFree].value(e, true);
+				oldBus !? { top[\f2StackBusRetire].value((bus: oldBus, alloc: s.audioBusAllocator),
+					top[\f2StackBusAfterBeats].value(0.4)) };
 				row.removeAt(sc);
 			};
 		};
@@ -1282,7 +1398,7 @@
 			var oldBus;
 			if (e.notNil and: { sig != e[\sig]
 				or: { e[\grp].isNil }
-				or: { e[\grp].isPlaying.not and: { (Main.elapsedTime - (e[\at] ? 0)) > 1 } } }) {
+				or: { top[\f2NodeLive].(e[\grp], e[\at]).not } }) {   // §node-live
 				// its bus is handed to the rebuild (reused when the pair count fits,
 				// else RETIRED after the voices' release — the sounding voices still
 				// write it); a bus from a previous server life is only forgotten
@@ -1418,6 +1534,7 @@
 			\addAction, \server, \callback, \finish, \sendGate, \selfFree, \id, \play, \parent, \buf];
 		var mkVoice, mkOne, pool, voice, idx, myGen, setA, susBeats, durB, cfgSig, gateOff, vgrp;
 		var offAtA, nowT, stillOpen, holdCont, respawned;
+		var bornA;   // §node-live the pool's per-voice spawn stamps
 		// §steal-x a hold onset landing on an OPEN voice of ANOTHER lane (see the
 		// LIMITS of §hold-note): the new note attacks, the stolen one is cut
 		var stealX = false;
@@ -1567,7 +1684,18 @@
 			var e;
 			if (vgs.isNil) { vgs = IdentityDictionary.new; top[\f2VGrp2] = vgs; top[\f2VGroups] = nil };
 			e = vgs[poolKey];
-			if (e.notNil and: { e[\par] !== grp }) { vgs.removeAt(poolKey); e = nil };
+			// §node-live a subgroup whose /g_new the server refused (its parent was
+			// gone when it went out) reads isPlaying true for ever, so the entry was
+			// kept and EVERY voice of this pool was then spawned into a group that
+			// does not exist — refused in turn, and each refused voice floods
+			// «/n_mapn Node N not found» once per mapped parameter per event. The
+			// group is REGISTERED for that test to have an answer: it was not
+			// before, so a RELOAD of this file over a sounding session drops each
+			// pool's old entry once (an empty group abandoned per pool, taken by
+			// the next hush) and builds a registered one — the same one-off a
+			// reload already costs at §node-bus.
+			if (e.notNil and: { (e[\par] !== grp)
+				or: { top[\f2NodeLive].(e[\g], e[\at]).not } }) { vgs.removeAt(poolKey); e = nil };
 			if (e.isNil) {
 				var myDef = def.asString, pred, succ;
 				vgs.keysValuesDo { |k, o|
@@ -1579,9 +1707,10 @@
 						};
 					};
 				};
-				e = (par: grp, def: myDef,
+				e = (par: grp, def: myDef, at: Main.elapsedTime,   // §node-live
 					g: if (pred.notNil) { Group.after(pred[\g]) }
 						{ if (succ.notNil) { Group.before(succ[\g]) } { Group.head(grp) } });
+				e[\g].register(true);
 				vgs[poolKey] = e;
 			};
 			e[\g]
@@ -1686,8 +1815,10 @@
 		// its final stage read a cycle before it is written, i.e. lost — so with a
 		// live post group the voice group goes right BEFORE it instead.
 		voiceGrp = { |par|
+			// §node-live Group.before a group the server refused is refused in turn,
+			// so the placement asks the same question the liveness guards ask
 			if (hasPost and: { par === grp } and: { pool.notNil } and: { pool[\post].notNil }
-				and: { pool[\post][\grp].isPlaying }) {
+				and: { top[\f2NodeLive].(pool[\post][\grp], pool[\post][\at]) }) {
 				Group.before(pool[\post][\grp])
 			} {
 				Group.new(par, \addToTail)
@@ -1750,7 +1881,12 @@
 							var ks = k.asString;
 							if (ks.beginsWith(pre)) {
 								var an = ks.copyToEnd(pre.size).asSymbol;
-								if (uc.includes(an)) { ua = ua ++ [an, top[\f2PortInSlot].(pn, 0)] };
+								if (uc.includes(an)) {
+									// §port-nil a nil slot = the port has no bus (the
+									// allocator refused it); the card keeps its own default
+									var sl = top[\f2PortInSlot].(pn, 0);
+									if (sl.notNil) { ua = ua ++ [an, sl] };
+								};
 							};
 						};
 					};
@@ -1773,7 +1909,8 @@
 				};
 				pamp = ev[\amp];
 				if (pamp.isNumber.not) { pamp = 1 };
-				pout = if (po.notNil and: { top[\f2PortOutSlot].notNil }) { top[\f2PortOutSlot].(po, 0) } { ev[\out] ? 0 };
+				// §port-nil an unallocated port falls back to the direct out, not to nil
+				pout = (if (po.notNil and: { top[\f2PortOutSlot].notNil }) { top[\f2PortOutSlot].(po, 0) }) ? (ev[\out] ? 0);
 				sink = Synth(\f2chainOut, [\in, pslot.(postFinal), \out, pout, \amp, pamp], pg, \addToTail);
 				sink.register(true);
 				// the static maps (top.use: ~mb/~mbSm live inside ~mbAt)
@@ -1798,7 +1935,7 @@
 						};
 					};
 				};
-				(grp: pg, nodes: nodes, sink: sink, bus: sb)
+				(grp: pg, nodes: nodes, sink: sink, bus: sb, at: Main.elapsedTime)   // §node-live
 			}
 		};
 		// §stack mkOne builds ONE copy (ci) of voice vi under `par` — the preset
@@ -1815,7 +1952,8 @@
 			// spawn; a missing helper shouts through §port-guard below, and the |h flag in cfgSig
 			// rebuilds the pool once f2units has finished loading.
 			if (po.notNil and: { top[\f2PortOutSlot].notNil }) {
-				a[1] = top[\f2PortOutSlot].(po, vi);
+				// §port-nil nil = no bus for that port; the voice keeps its direct out
+				top[\f2PortOutSlot].(po, vi) !? { |sl| a[1] = sl };
 			};
 			// §port-guard a missing helper (f2units not loaded) used to degrade SILENTLY: the
 			// port-writer's voice stayed on the direct output and «sounded outside the port» without
@@ -1864,7 +2002,10 @@
 							var ks = k.asString;
 							if (ks.beginsWith(pre)) {
 								var an = ks.copyToEnd(pre.size).asSymbol;
-								if (uc.includes(an)) { ua = ua ++ [an, top[\f2PortInSlot].(pn, vi)] };
+								if (uc.includes(an)) {
+									var sl = top[\f2PortInSlot].(pn, vi);   // §port-nil see mkPost
+									if (sl.notNil) { ua = ua ++ [an, sl] };
+								};
 							};
 						};
 					};
@@ -1984,7 +2125,10 @@
 							var ks = k.asString;
 							if (ks.beginsWith(pre)) {
 								var an = ks.copyToEnd(pre.size).asSymbol;
-								if (uc.includes(an)) { ua = ua ++ [an, top[\f2PortInSlot].(pn, vi)] };
+								if (uc.includes(an)) {
+									var sl = top[\f2PortInSlot].(pn, vi);   // §port-nil see mkPost
+									if (sl.notNil) { ua = ua ++ [an, sl] };
+								};
 							};
 						};
 					};
@@ -2041,7 +2185,10 @@
 			};
 			if (stk.isNil and: { chn.isNil } and: { pins.notNil } and: { top[\f2PortInSlot].notNil }) {
 				pins.keysValuesDo { |argName, pn|
-					if (ctrl.includes(argName)) { a = a ++ [argName, top[\f2PortInSlot].(pn, vi)] };
+					if (ctrl.includes(argName)) {
+						var sl = top[\f2PortInSlot].(pn, vi);   // §port-nil see mkPost
+						if (sl.notNil) { a = a ++ [argName, sl] };
+					};
 				};
 			};
 			// §synth-mod telemetry: an `sc:*` channel is written by ONE voice of the preset (vi=0),
@@ -2216,7 +2363,8 @@
 			// §orphan-fix respawn below would rebuild it with the NEW graph (mkVoice
 			// closes over the new cfg) in the OLD layout (nv/nk of the old pool) —
 			// retire at once instead, as a fresh onset would
-			if (contIdx.notNil and: { top[\f2VPlaying].(pool[\synths][contIdx]).not }) { contIdx = nil };
+			if (contIdx.notNil and: { top[\f2VPlaying].(pool[\synths][contIdx],
+				(pool[\bornAt] ? [])[contIdx]).not }) { contIdx = nil };
 			if (contIdx.notNil) {
 				deferHold = true;
 				pool[\retire] = cfgSig;
@@ -2256,6 +2404,10 @@
 			pool = (synths: Array.fill(nv, { |i| mkVoice.(i) }), rr: 0, gen: Array.fill(nv, 0), grp: grp, cfgSig: cfgSig,
 				artic: artic, nv: nv, nk: nk,   // §hold-retire the layout a deferred event must keep
 				lane: Array.fill(nv, nil),      // §hold-note the lane each voice last played
+				// §node-live when each voice's /s_new went out: inside ~f2NodeGrace an
+				// unconfirmed voice is alive (the confirmation is still in flight),
+				// after it only the server's own /n_go counts
+				bornAt: Array.fill(nv, Main.elapsedTime),
 				outAt: Array.fill(nv, ev[\out] ? 0));   // §node-bus the out each voice writes (mkOne baked this event's)
 			voices[poolKey] = pool;
 		};
@@ -2271,7 +2423,10 @@
 		// bus under the sounding voices would be reallocated. The retire that
 		// follows the held note builds the new pool with its post group.
 		if (hasPost and: { deferHold.not }) {
-			if (pool[\post].notNil and: { pool[\post][\grp].isPlaying.not }) {
+			// §node-live a post group the server refused reads isPlaying true for
+			// ever; judged by that alone it was never rebuilt and its cards, and
+			// the preset's whole output through them, stayed silent
+			if (pool[\post].notNil and: { top[\f2NodeLive].(pool[\post][\grp], pool[\post][\at]).not }) {
 				top[\f2FreePost].value(pool[\post]);
 				pool[\post] = nil;
 			};
@@ -2420,16 +2575,43 @@
 			and: { nowT < (offAtA[idx] ? 0) } and: { pool[\lane][idx] != ev[\f2lane] };
 		if (holdHow.isNil) { holdHow = if (nowT < (offAtA[idx] ? 0)) { \steal } { \fresh } };
 		voice = pool[\synths][idx];
-		if (voice.isNil or: { top[\f2VPlaying].(voice).not }) {
+		// §node-live the born stamp of THIS slot (nil on a pool from before the
+		// rule — then only a confirmed node counts, which is the safe reading)
+		bornA = pool[\bornAt];
+		if (bornA.isNil) { bornA = Array.fill(pool[\nv] ? nv, nil); pool[\bornAt] = bornA };
+		if (voice.isNil or: { top[\f2VPlaying].(voice, bornA[idx]).not }) {
 			// §orphan-fix before replacing, silence the previous node by nodeID: if isPlaying is
 			//   false on a voice that is still ALIVE (register(true) without /n_go), replacing it in
 			//   the pool would orphan a sounding node (gate stuck). A dead node: error suppressed, no-op.
 			// §cards a proxy counts as dead when ANY card node self-freed
 			//   (~f2VPlaying); the n_free goes to its GROUP (~f2VNode), so the
 			//   surviving cards and the sink are freed with it — nothing leaks.
+			// §node-live a voice the SERVER never confirmed (isPlaying true from
+			//   register(true), isRunning still false past the grace) is refused,
+			//   not dead: its /s_new never made a node. It is replaced like any
+			//   corpse — but say so ONCE per preset, because the cause outlives
+			//   the voice (a group that is gone, a SynthDef the server has not
+			//   got, maxNodes) and a respawn per event would otherwise be the only
+			//   sign. Before this the voice was never replaced at all and each
+			//   event mapped every parameter onto it: «/n_mapn Node N not found»
+			//   once per parameter per event, the same id, until the row stopped.
+			if (voice.notNil and: { top[\f2VRefused].(voice) }) {
+				warnOnce.(("refused_" ++ def.asString).asSymbol,
+					"⚠ [f2 voice] %: the server refused voice % (node %) — its /s_new made no node (the group it was spawned into is gone, % is not on the server, or maxNodes is reached). The voice is silent and is being respawned; check the server's post window for the /s_new or /g_new that failed.".format(def, idx, top[\f2VNode].(voice), instr));
+			};
 			voice !? { |v| var nid = top[\f2VNode].(v);
 				if (nid.notNil) { s.sendBundle(nil, [\error, 0], [\n_free, nid], [\error, 1]) } };
 			voice = mkVoice.(idx); pool[\synths][idx] = voice; respawned = true;
+			// §map-skip THE SLOT'S LAST-MAP MEMORY DIES WITH THE NODE IT DESCRIBED.
+			// The map below is conditional now, and a fresh node is mapped to NOTHING:
+			// left in place, lastMap[idx] would claim every parameter of this slot was
+			// already mapped, the new voice would never be mapped at all, and its
+			// parameters would sit at their SynthDef defaults for the life of the voice
+			// — silently. This is the one site: a cfgSig change drops the whole pool
+			// entry (§cfg-sig soft retire) and a row redeploy drops it with the pool
+			// (~f2FreeSceneVoices), so lastMap never outlives them.
+			pool[\lastMap] !? { |la| la[idx] = nil };
+			bornA[idx] = Main.elapsedTime;
 			// §node-bus mkOne baked this event's out into the fresh voice
 			pool[\outAt] !? { |oa| oa[idx] = ev[\out] ? 0 };
 		};
@@ -2496,10 +2678,41 @@
 		// tick (~16 ms). Without that, a mod whose computed value never changes
 		// (const lock, slow S&H) would keep the seeded neighbour value forever:
 		// the diff would never fire again and the stomp would stick.
+		// §map-skip THE MAP IS ISSUED ONLY WHEN THE BUS INDEX MOVED.
+		// Every event used to re-map every mapped parameter, per copy, whether or not
+		// anything had changed — one bundle of three messages each, on sclang's single
+		// thread, at note rate. The comparison that decides it was already here (it
+		// serves the §map-seed handoff above); only the map itself was unconditional.
+		//
+		// §collapse is what makes the saving large. A parameter nothing drives now
+		// shares ONE key per (preset, param) — the same bus for every cell, scene and
+		// row — so a voice moving from cell to cell keeps the same bus for it, and on
+		// the owner's save 97.59 % of keys are of that kind. Before the collapse the
+		// key was per cell and the bus genuinely changed, so there was little to skip.
+		//
+		// The skip is only as good as its invalidation, and getting THAT wrong is
+		// worse than not skipping at all, because the failure is a parameter frozen at
+		// its default for the life of a voice with no line in any log. Two things hold
+		// it up, and a third is named here only to be dismissed:
+		//   · lm — per VOICE SLOT (lastMap[idx]): the bus each (param, copy) of this
+		//     slot's node was last put on. Cleared where the node is respawned, which
+		//     is the ONE site that replaces a node under a pool that survives — a
+		//     cfgSig change drops the pool entry and a row redeploy drops the pool.
+		//   · the bus INDEX itself, which is why a smoother appearing later needs no
+		//     invalidation: ~mbAt answers ~mbSm[k] once that exists (f2_modsmooth.scd),
+		//     a different index, and the comparison sees it like any other move.
+		//   · the post sink, which is NOT skipped at all — the reason is at the branch.
+		//
+		// Knowingly given up: the repetition used to re-heal a map message lost in
+		// transit. The server is local (the §map-seed handoff below already relies on
+		// that, with getSynchronous) and every n_set on this path — gate, freq, t_trig
+		// — has always been sent exactly once. topEnvironment[\f2MapAlways] = true
+		// restores the unconditional behaviour for a session; the live check
+		// sc/nrt/live-voices.scd §G measures both arms through it.
 		if (ev[\f2map].notNil) {
 			top.use {
 				var lmAll = pool[\lastMap];
-				var lm, dirty;
+				var lm, dirty, always = top[\f2MapAlways] == true;
 				if (lmAll.isNil) { lmAll = IdentityDictionary.new; pool[\lastMap] = lmAll };
 				lm = lmAll[idx];
 				if (lm.isNil) { lm = IdentityDictionary.new; lmAll[idx] = lm };
@@ -2515,6 +2728,8 @@
 							var lmk = if (nk > 1) { (param.asString ++ "_s" ++ ci).asSymbol } { param };
 							if (b.notNil) {
 								var prev = lm[lmk];
+								// §map-skip prev is the bus THIS SLOT'S NODE was last put on
+								var moved = prev.isNil or: { prev.index != b.index };
 								if (prev.notNil and: { prev.index != b.index }) {
 									try {
 										var live = prev.getSynchronous;
@@ -2529,13 +2744,26 @@
 								// addressee with a divider — the pool's sink — and follows
 								// the bus of the last event (copy 0's key); the per-voice
 								// demux would drop it (no sink in the voice)
+								// §map-skip AND THIS ONE IS DELIBERATELY NOT SKIPPED. The post
+								// branch fires for ONE parameter (the preset level) once per
+								// event, so skipping it would save about a three-hundredth of
+								// the map traffic — against which it would need a last-map
+								// memory of its own, because the sink is one node for the
+								// WHOLE POOL and any voice's event may be the one that maps it:
+								// a per-voice memory would let one voice's `already mapped` hide
+								// a sink that is new, and pool[\post] is re-created above
+								// whenever the server refused or freed the old group. That is a
+								// second silent-failure path for a rounding error of a saving,
+								// and it is not worth it.
 								if (hasPost and: { param == \amp }) {
-									if (ci == 0) { pool[\post] !? { |p| p[\sink] !? { |sk| sk.map(\amp, b.index) } } };
+									if (ci == 0) { pool[\post] !? { |p| top[\f2MapQuiet].(p[\sink], [\amp, b.index]) } };   // §node-live
 								} {
-									if (nk > 1) {
-										top[\f2VMap].(voice[\copies][ci], param, b.index);
-									} {
-										top[\f2VMap].(voice, param, b.index);
+									if (always or: { moved }) {
+										if (nk > 1) {
+											top[\f2VMap].(voice[\copies][ci], param, b.index);
+										} {
+											top[\f2VMap].(voice, param, b.index);
+										};
 									};
 								};
 							};
@@ -2716,7 +2944,11 @@
 	});
 
 	~play = { |key, data, dur=4, quant=4, layers|
-		var grp = if (~f2PatGroup.notNil and: { ~f2PatGroup.isPlaying })
+		// §node-live a pattern group whose /g_new the server refused reads isPlaying
+		// true for ever, and every voice spawned into it would be refused too; the
+		// live test falls back to the default group instead, as it does for a group
+		// that has really gone
+		var grp = if (~f2NodeLive.(~f2PatGroup, ~f2PatGroupAt))
 			{ ~f2PatGroup } { s.defaultGroup };
 		var basePat = Pn(~toPat.value(data, dur), inf);
 		var pattern, final;
@@ -4496,6 +4728,16 @@
 		// a sound. The engine prints ~f2UnitGoneMsg to the post window, but a musician is not looking
 		// there: with this line the card says the same thing itself.
 		ctx[\unitsCut] = topEnvironment[\f2UnitsCut] ? ();
+		// 5d. §sc-deps WHAT THIS ENGINE CAN ACTUALLY BUILD. The filter models are a static
+		// table on the front (UNIT_BUILT), and until now that was safe because every unit
+		// built every model. It is not safe any more: four of the eleven play `SVF` from
+		// sc3-plugins, and on a machine without the pack ~f2FltBuilt drops them — so the card
+		// would go on offering a model the engine answers with its default. These two lines
+		// are the engine telling the card what it has: the per-unit built list, and which
+		// capabilities are missing (`#[\pv, \svf]`, empty on a full install). The card falls
+		// back to its static table when the key is absent, so an older engine changes nothing.
+		ctx[\fltBuilt] = topEnvironment[\f2FltBuilt] ? ();
+		ctx[\extMissing] = topEnvironment[\f2ExtMissing] ? #[];
 
 		// 6. Defs detail — alias → { instrument, numeric + symbol params }
 		ctx[\defsDetail] = ();

@@ -180,5 +180,21 @@ modulator — acts in **every** row and scene where that preset appears. If you 
 variants, duplicate the preset. The canvas gives you per-cell and per-block overrides
 ([[Scopes]]) for everything that should differ locally.
 
+---
+
+## 7. Deleting a preset, and undoing it
+
+A cell names its preset by **position** in the palette, so deleting a tile shifts every index
+to its right. The delete rewrites all of them in one pass — the editor's blocks, every cell of
+every scene track, the saved block **variables** and the melody trees — and empties the cells
+that played the deleted preset rather than sliding the next one into their place. Two other
+kinds of reference go with it: a harmony role that named the preset drops it, and any **port
+input** reading a port the deleted preset was the last writer of is cleared, with a line in the
+log naming the card that lost its input ([[Synth Modules|Synth-Modules]] §7).
+
+`mod+Z` takes **all of that** back in one step, the scene grid and the harmony included — not
+just the palette and the canvas you are looking at. The grid used to stay shifted after an undo
+that looked completely successful.
+
 See also: [[Card Chains|Card-Chains]], [[Synth Modules|Synth-Modules]], [[Modulators]],
 [[Harmony]].

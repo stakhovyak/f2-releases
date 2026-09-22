@@ -155,6 +155,18 @@ It is saved as `chainDivider`, the index of the first card right of the cut.
 - The cut is an index between two cards. A cut at the very start or past the last card means
   nothing and is never saved; removing the last card on either side removes the cut with it.
   **Bypass keeps a card's side** — a switch, not a move.
+- A `chainDivider` a project file carries but the app could never write — a fraction, a
+  string, a boolean, or the ordinary `2.0` a migration script or a `jq` filter leaves behind
+  — is read like any other unusable cut: **absent**, the strip plays whole, nothing is said
+  and nothing else in the project is affected. Only the value counts, so `2.0` and `2e0` are
+  the index 2. Both engines answer the same way; the core used to refuse the whole preset
+  list over one such field, and with it the scene.
+- The rule above is written once and read by four paths: the two compilers, which decide
+  whether to build a post group at all, and the two delivery paths, which decide whether a
+  knob rides the preset-level key or a per-cell one. They must agree on every clause or a
+  knob is published on a bus the program never mapped — the core's delivery classification
+  used to skip the "a source can never be right of the cut" clause, so a file carrying such a
+  strip had its source knobs delivered to nothing at all. All four now run one function.
 
 **Envelopes.** A singleton has no note to be gated by. It selects `env = 1` forever, exactly
 as a processor inside a voice does (§2), and its tail lives as long as the pool — which is

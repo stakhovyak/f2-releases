@@ -130,6 +130,13 @@ exist for it:
   monotonic and sclang drops stale or duplicate frames; a `beat` in the future is applied
   with `schedAbs` exactly on that beat, otherwise immediately.
 
+Values cross the wire as OSC float32, matching the old npm `osc` backend. The **beat** does
+not: `/f2_frame` and `/f2_setbt` carry it as an OSC double (`osc.Float64Arg`), because it is
+the one value SuperCollider *schedules* on. A float32 has 24 mantissa bits, so its
+representable step grows with uptime — about 2 ms at 120 bpm eight hours in, and a whole beat
+past 2^24 — and rounding a `schedAbs` target by a drifting millisecond is the opposite of
+what `schedAbs` is for. sclang reads the argument positionally, so the tag costs it nothing.
+
 A datagram is chunked at 7000 bytes. That limit is not decoration: a full base for a large
 scene in one packet exceeded the UDP maximum and was dropped silently.
 

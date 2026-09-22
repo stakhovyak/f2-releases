@@ -59,6 +59,16 @@ Samples are **mono** in the current version: channel 0 is taken, because `GrainB
 mono and the waveform display draws one channel. A stereo file loads; you hear its left
 channel.
 
+**Name them in letters, digits and `_`.** A card's sample pick travels to the engine as an
+opt value, and an opt value is sanitised on the way ( `[^A-Za-z0-9_]` → `_` ), while
+`~samples` is keyed by the file name as it stands. So a name the sanitiser would change
+cannot be picked: `kick-01.wav` and `Loop 120.wav` are loaded and visible in the post window,
+but the sampler's `sample` menu and convU's impulse menu do not offer them — the alternative
+was offering a pick that plays the preset's sample instead, or, with `my.kick.wav` and
+`my_kick.wav` side by side, plays the *other* file with nothing said. Rename the file and it
+appears. Subfolders are fine: `808/kick.wav` is loaded as `808_kick`, folded the same way on
+both sides.
+
 ---
 
 ## ModalSamples/
@@ -77,6 +87,32 @@ The save format is **additive**: new fields are added without bumping the versio
 loader migrates older shapes forward. A session saved by an older build opens; a session
 saved by a newer build opens in an older build with the newer features missing rather than
 failing.
+
+Closing the window writes an **autosave** here whenever the document holds anything at all —
+blocks, presets, variables or a single non-empty scene cell. It used to be written only when
+the *editor canvas* was non-empty, so a session spent on the scene grid that ended with an
+empty canvas left nothing behind. Nothing is loaded automatically at startup: the autosave is
+a file you pick from the sessions menu like any other.
+
+A load is **all or nothing**. A file that cannot be applied — one an older build, a hand edit
+or a bad merge left structurally damaged — leaves the project you have open exactly as it was
+and says so in the sessions panel. Container shapes it can repair (a missing cell list, an
+empty entry in a list) are repaired on the way in, and the log names every repair.
+
+A load also starts from a **clean sheet**. Everything the opened file does not mention is
+what a brand-new document has, not what the project you had open had: a file with no tempo
+opens at 120, a file with no macros opens with the twelve knobs at half, a file with no
+param layers opens with the base layer alone, and a file with no scenes opens with an empty
+grid. The same goes for the things that are easy to forget because they are optional: the
+root node's own bus and deck, and the cell the editor was open on — a project saved with the
+editor closed opens with it closed, rather than inheriting the cell the last project was
+editing and autosaving the new project's editor into it. This used to be the other way
+round — each field was applied only if the file carried it, so a clean project loaded over
+a busy one inherited its macros, its layers, its tempo,
+its harmony and its rows, and nothing on screen said where they had come from. A file whose
+shape cannot be read for one of those fields (see the repairs above) is treated the same way
+as a file that does not carry it: that part of the loaded project is simply empty, and the
+log names it.
 
 ---
 
@@ -101,8 +137,14 @@ A GUI-launched application gets the minimal system `PATH` with no shell configur
 is why the explicit list exists: `which sclang` succeeding in your terminal says nothing
 about the packaged build.
 
-**sc3-plugins** is optional. Without it the Sampler's Spectral mode falls back to a simpler
-algorithm and says so in the banner; nothing else is affected.
+**sc3-plugins** is optional, and the engine loads without it. Two things degrade, each
+posting one line at load: the Sampler's Spectral mode falls back to a simpler algorithm, and
+the four filter models built on `SVF` — `sk`, `svf`, `fizz`, `ripple` — are not built, so a
+save asking for one plays the unit's default model and the card marks it. Nothing else is
+affected. The engine names those classes as symbols rather than literally for exactly this
+reason: sclang resolves a class name when it COMPILES the file, so one literal from the pack
+would lose the whole units file and leave the app with no instruments at all
+(`~f2ExtNeeds` in `sc/f2units.scd`, checked by `sc/nrt/extdeps.scd`).
 
 ---
 

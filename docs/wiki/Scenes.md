@@ -114,6 +114,12 @@ ordinary modulators when the session is built — see [[Card Chains|Card-Chains]
 - **stop** — the row stops on its boundary and its channels are swept;
 - **stop all** — every row;
 - **hush** — the panic path: stops everything immediately, in both the core and SuperCollider.
+  On the SC side it stops every pattern AND frees the nodes — the pattern group, every pooled
+  voice and every deck — which is what makes it safe for the core to drop its whole row table
+  in the same breath and send no per-row stop snippet afterwards. It has to free them
+  explicitly: a held note (`hold` articulation, or one gated from a channel) has no scheduled
+  gate-off, so stopping the patterns alone would leave it ringing with its deck stripped off
+  it and no row left to stop it.
 
 A row that fails to deploy shows an **alert** state rather than silently not starting. The
 cause is in the [[Shell]] log and the mechanism is [[Architecture]] §5.

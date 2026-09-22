@@ -60,6 +60,18 @@ Shortcuts for what you type most often.
 `CmdPeriod`, which frees the nodes — and takes the eval drain routine with it, which the
 watchdog then rebuilds ([[Architecture]] §2).
 
+A panic also frees the **parameter smoothers** — one node per modulated key, the segment that
+carries a knob from its raw bus to the smoothed one every consumer reads. Those are rebuilt
+about half a second after the panic, on their own buses, so nothing that was mapped onto a
+smoothed bus has to be remapped. Until that fix they were not rebuilt at all: the engine's own
+"is there a smoother for this key" test was a client-side object that stays exactly as truthful
+after the node under it is gone, so every smoothed knob stopped moving — the raw bus took new
+values and the smoothed one held the last value the dead segment ever wrote — until the engine
+was restarted. Each knob comes back with the smoothing it had: the core tells the engine a
+knob's smoothing is off only once, when it changes, so a rebuild that smoothed everything alike
+would leave a channel gate slewed for the rest of the set. If you ever see either of those
+again, the check that pins them is `sc/nrt/live-smooth.scd`.
+
 ---
 
 ## What is useful to type
@@ -76,6 +88,21 @@ maintains, and reading them is the fastest way to answer "did my thing actually 
 ~defs.keys;                              // every preset definition the last deploy wrote
 ~f2ReuseCfg[\<defKey>];                  // one preset's spawn configuration
 ```
+
+A def key is a symbol the compiler writes, not the name you typed. A name that is not a
+plain identifier is emitted quoted — type "808 Kick" in the palette and the key is
+`808Kick`, written `~defs['808Kick']`; `~f2ReuseCfg['Sub!']` likewise — because
+sclang's bare `\symbol` is an identifier and nothing else, and the whole program is one
+expression, so one unquotable character used to lose the entire row (and the `Pdef.all.do
+(_.stop)` the deploy opens with, which is why the previous program kept playing). And two
+presets that arrive with the SAME key do not share one def: the first keeps the name, the
+next takes the first free `<name>_<n>`, so `~defs.keys` always has one entry per preset.
+`~defs.keys` is therefore where you read which key a preset ended up under — `~f2TelMap`
+answers the same question, but only for a preset with telemetry armed.
+
+The same rule holds for the other names you type: a port name (`portOut`, `portIns`,
+`~f2PortEnsure`) and a §stack sub-unit's id are stripped of punctuation before they are
+written, but a name that still is not an identifier — `8bit`, say — is quoted the same way.
 
 Server-side questions:
 

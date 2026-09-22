@@ -1,0 +1,17 @@
+# §sc-deps HOW THE MISSING-PACK CASE IS REPRODUCED, without touching the machine.
+# sclang takes its class-library search paths from a config file (-l); excluding the
+# Extensions directories starts an interpreter whose class library is exactly the core,
+# which is what a user who never installed sc3-plugins runs. The engine must load there
+# too — before §sc-deps it did not compile at all.
+#
+#   QT_QPA_PLATFORM=offscreen sclang -d /tmp -i none -l sc/nrt/no-extensions.yaml <abs>/sc/nrt/extdeps.scd
+#
+# The paths below are a Debian/Ubuntu install (the one sc/nrt/README.md documents). On
+# another platform, point excludePaths at that install's Extensions directories; sclang
+# prints the ones it compiles at startup, so the list is readable off a normal run.
+includePaths:
+  - /usr/share/SuperCollider/SCClassLibrary
+excludePaths:
+  - /usr/share/SuperCollider/Extensions
+  - /root/.local/share/SuperCollider/Extensions
+postInlineWarnings: false

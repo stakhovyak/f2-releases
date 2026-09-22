@@ -300,7 +300,21 @@ identical values, sent once each — so arming a spread is a live edit and never
 
 Across a redeploy the copy keys survive by three rules. The live preamble seeds every
 `<key>_s<k>` with `clamp(base + offset)` when a spread is armed (`Options.SpreadOffsets` /
-`Options.Ranges` in `core/compiler`), so the bus holds the right value before the first tick.
+`Options.Ranges` in `core/compiler`, `spreadOffsets` / `ranges` in `src/lib/compiler.ts`), so
+the bus holds the right value before the first tick. Both compilers take the two inputs from
+the same place — the presets' `spreads` through `spreadOffsets`, and the session's
+`paramRange` — the core through `Program.Spreads` / `Program.Ranges`, the editor through
+`src/stores/seedOpts.ts`, which every `compileSession` call site of the store passes. That is
+what makes the program shown in the code panel the program the core deployed: while the store
+passed neither, the panel showed a spread stack seeded in unison (`cut` 1200 ± 250 written
+1200 on all three copy buses instead of 950/1200/1450) and a deck knob seeded outside the
+range it had been narrowed to.
+The clamp is the same for **every** seed the preamble writes, because the core clamps every
+delivery a tick later: the plain per-cell key, the preset-level key of a §post singleton and
+each copy — including a copy with no offset of its own. A copy adds its offset to the *raw*
+base and the sum is clamped, never the other way round, which is how the row stream composes
+it; clamping the base first and spreading off the clamped value would move a copy the core
+never moves.
 On every confirmed `/f2_ack` — the initial launch included — the conductor forgets its per-row
 value and flag diff and re-sends every live key on the next tick, because the preamble's
 `~mbAt.(k).set(base)` overwrites un-smoothed buses. And a delivery key that vanished (copies
@@ -315,7 +329,7 @@ shrunk, a cell removed) is dropped from the store and the diff (`RowStream.Delet
 |---|---|---|---|
 | per-note instances | `src/lib/v2/modulators.ts`, `streamEngine.ts` | `core/mods/mods.go`, `core/rowstream/rowstream.go` | — |
 | `copies`, `spreads` in the session | `src/lib/v2/session.ts` (payload) | `core/session/session.go`, `core/gateway/gateway.go` (`Program`) | — |
-| spread applied, copy keys | `streamEngine.ts` | `rowstream.go`, `conductor.go` (flags, ack re-send), `compiler.go` (preamble seeds) | `~f2VMap` per copy |
+| spread applied, copy keys | `streamEngine.ts`, `compiler.ts` + `stores/seedOpts.ts` (preamble seeds) | `rowstream.go`, `conductor.go` (flags, ack re-send), `compiler.go` (preamble seeds) | `~f2VMap` per copy |
 | `copies:` in the cfg line | `src/lib/compiler.ts` | `core/compiler/compiler.go` | `\f2voice` reads it |
 | the 16 cap | `TensorView.vue`, `usePortMenu.ts`, `compiler.ts` | `compiler.go` | `f2dsl.scd`, `f2units.scd`, `f2_boot.scd`, `f2_modsmooth.scd` |
 | the palette UI | `TensorView.vue` (voices row, spread blocks), `sequencer.ts` (store) | — | — |

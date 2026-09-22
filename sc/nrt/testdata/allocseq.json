@@ -1,0 +1,427 @@
+{
+ "beatDur": 4,
+ "cases": [
+  {
+   "name": "rr",
+   "why": "round robin over fresh onsets: 4 notes on 3 voices give 0,1,2,0",
+   "def": "aRR",
+   "spec": {
+    "voices": 3,
+    "artic": "reattack",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 0.5,
+     "lane": "",
+     "legato": 0
+    },
+    {
+     "at": 2.4,
+     "dur": 0.5,
+     "lane": "",
+     "legato": 0
+    },
+    {
+     "at": 4.8,
+     "dur": 0.5,
+     "lane": "",
+     "legato": 0
+    },
+    {
+     "at": 7.2,
+     "dur": 0.5,
+     "lane": "",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 2,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    }
+   ]
+  },
+  {
+   "name": "mono",
+   "why": "one voice: the slot is always 0, and another lane over it is a steal",
+   "def": "aMono",
+   "spec": {
+    "voices": 1,
+    "artic": "hold",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 0.5,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 1,
+     "dur": 0.5,
+     "lane": "/t:p:1",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": true,
+     "holdCont": false,
+     "stillOpen": true
+    }
+   ]
+  },
+  {
+   "name": "run",
+   "why": "a hold run in ONE lane stays on ONE voice (endingV)",
+   "def": "aRun",
+   "spec": {
+    "voices": 3,
+    "artic": "hold",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 0.5,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 2,
+     "dur": 0.5,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 4,
+     "dur": 0.5,
+     "lane": "/t:p:0",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": true,
+     "stillOpen": true
+    },
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": true,
+     "stillOpen": true
+    }
+   ]
+  },
+  {
+   "name": "lanes",
+   "why": "an onset of ANOTHER lane at the same boundary takes its own voice",
+   "def": "aLanes",
+   "spec": {
+    "voices": 3,
+    "artic": "hold",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 0.5,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 2,
+     "dur": 0.5,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 2,
+     "dur": 0.5,
+     "lane": "/t:p:1",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": true,
+     "stillOpen": true
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    }
+   ]
+  },
+  {
+   "name": "steal",
+   "why": "every voice busy and the lane is foreign: a cross-lane steal (§steal-x)",
+   "def": "aSteal",
+   "spec": {
+    "voices": 2,
+    "artic": "hold",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 2,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 0.4,
+     "dur": 2,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 1,
+     "dur": 2,
+     "lane": "/t:p:1",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": true,
+     "holdCont": false,
+     "stillOpen": true
+    }
+   ]
+  },
+  {
+   "name": "merge",
+   "why": "every voice busy but the lane is its OWN: the merge, not a steal",
+   "def": "aMerge",
+   "spec": {
+    "voices": 2,
+    "artic": "hold",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 2,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 0.4,
+     "dur": 2,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 1,
+     "dur": 2,
+     "lane": "/t:p:0",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": true,
+     "stillOpen": true
+    }
+   ]
+  },
+  {
+   "name": "respawn",
+   "why": "a slot whose node died is picked again and respawned: 0,1,0",
+   "def": "aResp",
+   "spec": {
+    "voices": 2,
+    "artic": "reattack",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 0.25,
+     "lane": "",
+     "legato": 0
+    },
+    {
+     "at": 2,
+     "dur": 0.25,
+     "lane": "",
+     "legato": 0
+    },
+    {
+     "at": 4,
+     "dur": 0.25,
+     "lane": "",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    }
+   ],
+   "wantRespawn": true,
+   "selfFree": true
+  },
+  {
+   "name": "scan",
+   "why": "the round-robin slot is busy and a free one lies further: the scan finds it",
+   "def": "aScan",
+   "spec": {
+    "voices": 3,
+    "artic": "hold",
+    "beatDur": 4,
+    "gateSrc": false
+   },
+   "events": [
+    {
+     "at": 0,
+     "dur": 4,
+     "lane": "/t:p:0",
+     "legato": 0
+    },
+    {
+     "at": 0.4,
+     "dur": 0.1,
+     "lane": "/t:p:1",
+     "legato": 0
+    },
+    {
+     "at": 0.8,
+     "dur": 0.1,
+     "lane": "/t:p:2",
+     "legato": 0
+    },
+    {
+     "at": 3.2,
+     "dur": 0.5,
+     "lane": "/t:p:3",
+     "legato": 0
+    }
+   ],
+   "want": [
+    {
+     "idx": 0,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 2,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    },
+    {
+     "idx": 1,
+     "stealX": false,
+     "holdCont": false,
+     "stillOpen": false
+    }
+   ]
+  }
+ ]
+}

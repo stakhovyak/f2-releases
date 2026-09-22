@@ -96,25 +96,125 @@ row's voice, means the lanes disagree between the deployed code and the engine: 
 row (the compilers tag every cell event with its lane) and restart SC if the engine file is
 older than the app. `topEnvironment[\f2DebugHold] = nil` stops the posts.
 
+### One voice stopped following a knob, and the others did not
+
+A voice reads its parameters off control buses, and the engine puts it on them with a **map**
+per parameter. Since §map-skip that map is issued only when the bus INDEX moved: a parameter
+nothing drives shares one bus per (preset, param), so a voice playing cell after cell stays on
+the same bus and is not told again. What makes this worth its own entry is the shape of the
+failure if the engine ever forgets a voice has been replaced — that voice, and only that
+voice, sits at its SynthDef **default** for the rest of its life, with no line in any log,
+while its neighbours follow the knob normally.
+
+To tell that apart from a modulation that is simply not reaching the key, evaluate
+`topEnvironment[\f2MapAlways] = true` in sclang: every event maps every parameter again, as
+before the change. If the stuck voice recovers on its next note, the map was the cause; if it
+does not, the parameter is not being written at all and the trail is the bus, not the map.
+`topEnvironment[\f2MapAlways] = nil` restores the skip. (The check that pins the behaviour
+both ways is `sc/nrt/live-voices.scd` §G.)
+
 ### The whole engine goes quiet after a long session
 
 The server's **audio bus pool** is exhausted. The message says so:
 
 ```
 ✗ f2: cannot allocate a stack bus (N ch) for pool … — the server's audio bus pool is exhausted
+✗ f2: cannot allocate a deck bus (N ch) for <scope> of row … — the deck is bypassed
+✗ f2: cannot allocate a port bus (32 ch) for <name> — the port is bypassed
 ```
 
 Raise `s.options.numAudioBusChannels` in **config** and reboot the server. If it recurs
 quickly, something is allocating per deploy rather than reusing; check the [[Rack]] and the
 port registry.
 
+All three lines are **refusals, not crashes**: the stage, the deck or the port is bypassed
+and the rest of the deploy runs. The port line is the newest of them — a port whose bus was
+not nil-checked used to raise `Message 'index' not understood` out of the middle of the
+deploy program, which the compilers emit as ONE expression, so the row's voices were never
+gated, its decks never synced and its pattern never started; and the broken entry was cached,
+so every later deploy of every row threw at the same line until SC was restarted. Note that
+the pool only has to be FRAGMENTED, not empty: a 32-channel port can be refused while an
+8-channel stage bus and a 4-channel deck bus in the same pool still allocate.
+
+### `the variant name … is not unique`
+
+Two different option sets spell one SynthDef name, and the name is the build cache's key, so
+the second set is answered with the FIRST set's def: the card shows your pick and the voice
+sounds like the other setting. The name is `unit__k_v__k_v` with every character outside
+`[A-Za-z0-9_]` turned into `_`, so a value carrying `__`, or one whose sanitisation is
+another's literal spelling (`a.b`, `a b` and `a_b` are one name), collide. No shipped option
+can do this — the check `sc/nrt/variant-name.scd` asserts that every graph option value is
+bare alphanumeric — so the line means a new option has been added whose values are not.
+Spell the values in bare alphanumerics and redeploy.
+
+### The edit does nothing — the row goes on playing the old structure
+
+Look for one line in the [[Shell]]:
+
+    ✗ f2: OUT OF MODULATION BUSES — this session holds N of them …
+
+Control buses are held for the life of the SuperCollider session — they are never freed, since
+patterns of rows that were not redeployed still hold their indices. What spends them is this:
+
+* A parameter **something modulates** — an arm, a lock, a ramp, a macro — takes one bus per
+  **sounding cell**, per scene, per row. Two cells of one preset can hold different values at
+  the same moment, so they need different buses.
+* A parameter **nothing modulates** takes **one bus, full stop** — shared by every cell, every
+  scene and every row that uses the preset, because its value is the preset's knob and is the
+  same number everywhere. (These are the same shared buses the singleton processors right of
+  the [[strip divider|Card-Chains]] have always used.)
+
+So the pool is spent by **what you modulate**, not by how big the piece is. On the save this
+was measured against — eight sounding cells of a preset with 24 live parameters, one of them
+armed — it is 23 shared buses plus 8 for the armed one: **31 instead of 192**.
+
+Before that rule the first bullet applied to everything, and the pool went fast: one 16×5 block
+of a `polymer` preset cost 4648 buses and a second block of the same size took it to 9960. Under
+the rule above the same block costs one bus per live parameter of the preset, once, plus one per
+sounding cell for each parameter you actually armed.
+
+When the pool runs out, the deploy program throws at the first cell whose bus it could not
+get, and **everything after that line never runs**: the `Pdef` is never swapped, so the row
+keeps playing the previous structure while the app shows the new one. The edit looks like it
+did nothing.
+
+The pool is `s.options.numControlBusChannels` in `sc/f2_boot.scd`, and it is 1000000. If you do
+hit it, the thing to reduce is the count of **armed** parameters across sounding cells — arming
+one parameter of a preset that plays 80 cells costs 80 buses, and arming eighty parameters of a
+preset that plays one cell costs eighty. Fewer sounding cells and a preset with fewer live
+parameters (a `polymer` carries 81; most units carry a dozen) help for the same reason.
+
+Raising it further is **not** the answer, and the file clamps it for a reason. The control
+buses live in a shared-memory segment whose size is hard-coded in SuperCollider, so there is a
+hard wall at **1044970** channels: above it the server throws `Exception in World_New:
+boost::interprocess::bad_alloc` and segfaults *before it binds its port*. f2 now reports that
+as a boot error naming the option; before it did not, and a too-large value left the app on a
+disabled button reading "ready".
+
 ### A flood of `/n_mapn Node not found`
 
-Voice registries are mapping nodes that are already dead. `/g_freeAll` and `/n_free` on a group
-kill children **silently** — no `/n_end` per node — so `isPlaying` stays true over corpses.
+A voice the **server refused**. `/s_new` and `/g_new` are refused when the group they name is
+gone, when the server has not got that SynthDef, or when `maxNodes` is reached: scsynth prints
+one line and drops the message. The client still has the node object it made, and it assumes
+the node is playing until the server says otherwise — so a refused node looked alive for ever,
+the pool never replaced it, and every event went on addressing it: one line per **modulated
+parameter** per event, the same node id over and over, with the preset silent throughout.
 
-It resolves itself on the next deploy. If it does not, `CmdPeriod.run` from the [[Shell]] and
-relaunch the row.
+Since the §node-live fix the engine asks the server for a confirmation instead of assuming one
+(`isRunning`, which only a real `/n_go` sets), so such a voice is replaced on the next event and
+the preset comes back by itself once the cause is gone. The per-event set and remap are also
+sent with the error suppressed — as every other best-effort send already was — so a voice that
+dies between the decision and the packet costs nothing. What you get instead is one line:
+
+    ⚠ [f2 voice] <preset>: the server refused voice <n> (node <id>) — its /s_new made no node …
+
+naming the preset, the voice and the def. Look in the server's post window for the `/s_new` or
+`/g_new` that failed just before it: that names the real cause. `sc/nrt/live-restart.scd` is the
+check that pins all of this.
+
+An older note here blamed `/g_freeAll` for killing children without `/n_end`. Measured on
+3.13.0, that is not so: freeing a group sends `/n_end` for every node under it, children and
+grandchildren alike, so a registered voice taken by a hush really does drop to "not playing".
 
 ### An edited SynthDef does not take effect
 
@@ -141,6 +241,21 @@ The error itself is in the [[Shell]] log, above the point where output stopped.
 
 **sc3-plugins** is not installed. The sampler's spectral generator falls back to `Warp1` and
 posts a reduced-capability warning once at load.
+
+### Four filter models are missing from the menu
+
+The same cause: `sk`, `svf`, `fizz` and `ripple` are built on `SVF`, which ships in
+**sc3-plugins**. Without the pack the engine does not build them, says so once
+(`⚠ [f2 deps] filter models …`), and the card lists them with the reason and refuses the
+pick. A save already set to one plays the unit's default model and the slot button prints
+`svf → poly`. Installing the pack and reloading the context brings them back.
+
+### The engine loads nothing at all after an edit to the units file
+
+If the post window shows `Class not defined`, a UGen from an optional pack has been named
+literally somewhere in `sc/*.scd`. sclang resolves class names at compile time, so ONE such
+name loses the entire file and the app has no units. Reach it through `~f2Ext` by name
+instead; `sc/nrt/extdeps.scd` and the front's own `scDeps` test both fail on a literal.
 
 ---
 

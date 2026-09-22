@@ -9,7 +9,7 @@ var ok = 0, fail = 0, failed = [];
 var pmOpts, pmBase, pmSeen = IdentitySet.new, pmBuilt = 0, pmDrift = [], pmWarn, pmLive, pmSpec;
 var psFilt, psBase, psSeen = IdentitySet.new, psBuilt = 0, psDrift = [], psWarn, psLive, psSpec, psCases;
 var fltKeys, fltDrift, envKeys, envDrift, envMenus, psEnv, smpOpts;
-var smpFilt, smpBase, smpBuilt = 0, smpDrift = [], smpSizes = (), smpWarn, fltSel, fltSel2, fltBuilt, fltBase, fltCost;
+var smpFilt, smpBase, smpBuilt = 0, smpDrift = [], smpSizes = (), smpWarn, fltSel, fltSel2, fltBuilt, fltBase, fltCost, fltWant, smpWarnWant;
 var smpPlay, smpQual, smpPQ = (), smpPQDrift = [], smpPQBuilt = 0, smpQualNull;
 var cutList, liveUnits, procUnits, convBase, convSmp, convOpts, convDrift, convNames;
 var cvTri;
@@ -538,8 +538,21 @@ fltDrift = fltKeys.reject { |k|
 // contract's rows give (poly 8, ld 4, mg 0, sk 16, svf 4, comb 2, xp 15,
 // vowels 3 × 7, fizz 2, rasp 2 × 3, ripple 3 × 4) — the arms clamp to them
 fltBuilt = topEnvironment[\f2FltBuilt] ? ();
+// §sc-deps the menu this run can build: four models play `SVF`, which lives in sc3-plugins
+// and not in the core class library, so on a machine without the pack they have no arm and
+// ~f2FltBuilt drops them. The assertion is against what the capability allows, not against
+// the advertised eleven — otherwise this check reads FAIL on a stock install, where the
+// engine is behaving exactly as designed. sc/nrt/extdeps.scd is the check for the
+// capability itself; run it both ways.
+fltWant = if (topEnvironment[\f2ExtHas].(\svf)) { topEnvironment[\f2FltModels].asArray } {
+	topEnvironment[\f2FltModels].asArray.reject { |m| topEnvironment[\f2ExtFltModels][\svf].includes(m) }
+};
+if (topEnvironment[\f2ExtHas].(\svf).not) {
+	("flt §sc-deps SVF is absent — the buildable menu is " ++ fltWant.size ++ " of "
+		++ topEnvironment[\f2FltModels].size ++ " models (missing " ++ topEnvironment[\f2ExtFltModels][\svf] ++ ")").postln;
+};
 ("flt built per unit = the whole menu: " ++ #[\polysynthU, \polymerU, \samplerU].collect { |u|
-	(fltBuilt[u] ? #[]).asArray.copy.sort == topEnvironment[\f2FltModels].asArray.copy.sort }
+	(fltBuilt[u] ? #[]).asArray.copy.sort == fltWant.copy.sort }
 	++ " (must be all true); defaults first: " ++ #[\polysynthU, \polymerU, \samplerU].collect { |u| (fltBuilt[u] ? #[]).first }
 	++ " (must be poly ld poly)").postln;
 fltSel = topEnvironment[\f2FltModeSel] ? (); fltSel2 = topEnvironment[\f2FltMode2Sel] ? ();
@@ -597,7 +610,15 @@ envMenus = #[\polysynthU, \samplerU, \polymerU].collect { |u| (((topEnvironment[
 	((topEnvironment[\f2EnvBuilt] ? ())[u] ? #[]).first } ++ " (must be adsr ahdsr adsr)").postln;
 smpWarn = (topEnvironment[\f2UnitWarned] ? IdentitySet.new).asArray
 	.collect(_.asString).select { |k| k.beginsWith("smp_") }.sort;
-("sampler fallback warnings: " ++ smpWarn.size ++ " (must be 0: every filter and every envelope the sampler loops ask for is built) " ++ smpWarn.join(" ")).postln;
+// §sc-deps with the pack absent the sampler legitimately falls back: once per SVF filter
+// model it was asked for, and once for the spectral play mode. Those are the warnings the
+// capability is FOR, so the expected count follows it; on a full install it is still 0.
+smpWarnWant = if (topEnvironment[\f2ExtHas].(\svf) and: { topEnvironment[\f2SmpPV] }) { 0 } {
+	(if (topEnvironment[\f2ExtHas].(\svf)) { 0 } { topEnvironment[\f2ExtFltModels][\svf].size })
+		+ (if (topEnvironment[\f2SmpPV]) { 0 } { 1 })
+};
+("sampler fallback warnings: " ++ smpWarn.size ++ " (must be " ++ smpWarnWant
+	++ ": every filter and every envelope the sampler loops ask for is built, less what an absent sc3-plugins takes) " ++ smpWarn.join(" ")).postln;
 // ── §conv-ir convU's two modes ────────────────────────────────────────────
 // `ir` is STRUCTURAL: `bus` is Convolution2 over a LocalBuf the graph records
 // into, `sample` is PartConv over a prepared spectrum buffer. The two things

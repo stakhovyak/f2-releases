@@ -45,8 +45,11 @@ comes first. Without it the app opens and the engine never boots.
 | Linux   | `apt install supercollider` · `dnf install supercollider`                     |
 | Windows | the installer from [supercollider.github.io](https://supercollider.github.io/downloads) |
 
-Optional: **sc3-plugins** adds the Sampler's Spectral mode. Without it that one
-mode falls back to a simpler algorithm; everything else is unaffected.
+Optional: **sc3-plugins**. Without it the engine loads and plays, and two things
+degrade, each saying so once in the post window: the Sampler's Spectral mode
+falls back to a simpler algorithm, and four of the eleven filter models (`sk`,
+`svf`, `fizz`, `ripple`) are not built — a save asking for one plays the unit's
+default model, and the card marks them. Everything else is unaffected.
 
 Then take the installer for your system from the releases page: `.deb`, `.rpm`
 or `.AppImage` on Linux, `.dmg` on macOS (one universal build for both Intel
